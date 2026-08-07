@@ -1,0 +1,25 @@
+# Built binaries (built to /tmp during development; this just guards
+# against someone building to the repo root instead)
+/acme-hub
+/acme-client
+/acme-onboard
+
+# Local runtime state — SQLite databases, self-signed certs, and any local
+# dev config a contributor might create by copying an example — none of
+# this should ever be committed
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.pem
+*.env
+*-dev-config.yaml
+devdata/
+hubdata/
+spokedata/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

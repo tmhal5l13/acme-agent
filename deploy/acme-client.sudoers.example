@@ -1,0 +1,20 @@
+# Authorizes the acme-client system user to run EXACTLY the reload
+# command(s) configured in this spoke's config.yaml `reload_hook` fields -
+# nothing else. Copy this file to /etc/sudoers.d/acme-client (mode 0440,
+# owned by root:root) and edit the command list below to match your actual
+# reload_hook value(s) exactly, including arguments.
+#
+# Validate before relying on it:
+#   visudo -c -f /etc/sudoers.d/acme-client
+# A syntax error in a sudoers.d file can break sudo entirely for every user
+# until it's fixed - always check with visudo -c, never hand-edit and hope.
+#
+# Do NOT broaden this to "ALL" or a wildcard command. acme-client.service
+# deliberately does not set NoNewPrivileges=yes (that flag would break
+# sudo's setuid-root re-exec entirely, silently turning every reload_hook
+# into a no-op) - so this sudoers rule is the only thing standing between
+# a compromised acme-client process and root. Keep it scoped to exactly
+# the one or two commands this spoke actually needs.
+
+acme-client ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+# acme-client ALL=(root) NOPASSWD: /usr/bin/systemctl restart freeradius

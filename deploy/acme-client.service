@@ -1,0 +1,49 @@
+[Unit]
+Description=acme-agent spoke client - ACME issuance and local install for this host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/acme-client --config /etc/acme-client/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+# Unlike the hub, this needs a real, stable, nameable system user - the
+# reload hook (e.g. "sudo systemctl reload nginx") is authorized via a
+# sudoers rule scoped to a specific username, which DynamicUser's
+# per-start-random UID can't provide. See install-client.sh, which
+# creates this user, and acme-client.sudoers.example for the rule itself.
+User=acme-client
+Group=acme-client
+StateDirectory=acme-client
+StateDirectoryMode=0750
+
+EnvironmentFile=/etc/acme-client/acme-client.env
+
+# Hardening - deliberately does NOT set NoNewPrivileges=yes. That flag
+# would prevent the reload_hook's "sudo ..." from actually gaining root:
+# NoNewPrivileges disables the kernel's setuid-on-exec mechanism for this
+# process and everything it execs, including sudo, so the hook would run
+# but silently fail to actually reload anything. Everything else below
+# was verified compatible with this project's compiled binary (pure Go,
+# no cgo) via a rootless `systemd-run --user` transient unit during
+# development; ProtectSystem/ProtectHome/PrivateTmp were confirmed with
+# the process still able to bind its ports and run correctly.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target

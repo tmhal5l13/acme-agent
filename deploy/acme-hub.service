@@ -1,0 +1,61 @@
+[Unit]
+Description=acme-agent hub - centralized ACME renewal authority
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/acme-hub --config /etc/acme-hub/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+# Identity: a fresh, unique UID/GID allocated by systemd for this service
+# alone (never reused across restarts or other services), no shell, no
+# home directory to manage manually. The hub never execs anything (unlike
+# the spoke's reload hook, which needs a stable, nameable user for its
+# sudoers rule - see acme-client.service), so it has no reason to need a
+# real system user.
+DynamicUser=yes
+StateDirectory=acme-hub
+StateDirectoryMode=0750
+
+# Secrets referenced via ${VAR} in config.yaml (DNS provider credentials,
+# spoke bearer tokens) - populate this file on the host, keep it out of
+# source control, mode 0600.
+EnvironmentFile=/etc/acme-hub/acme-hub.env
+
+# Hardening. NoNewPrivileges/ProtectSystem/ProtectHome/PrivateTmp/
+# MemoryDenyWriteExecute were verified directly against this project's
+# compiled binary (pure Go, no cgo) via a rootless `systemd-run --user`
+# transient unit during development - it started, bound its port, and
+# served real requests under all of them. The remaining directives are
+# standard systemd.exec(5) hardening for a network-facing daemon that
+# touches no kernel interfaces, no namespaces, and no real-time
+# scheduling; they could not be verified the same way (dropping some
+# capabilities-gated restrictions requires CAP_SETPCAP, which an
+# unprivileged user session doesn't have - the failure is a limitation of
+# rootless testing, not a sign of incompatibility), but they apply
+# correctly under the real root-managed system unit this file describes.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

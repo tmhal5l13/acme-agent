@@ -1,0 +1,43 @@
+# cmd/acme-client config, for one spoke host. This binary generates its own
+# key, drives its own ACME order, installs the resulting certificate
+# locally, and runs its own local reload hook — it never sends the hub a
+# private key, and never holds DNS provider credentials itself. See
+# ARCHITECTURE.md for the full request flow.
+
+hub_url: "https://192.0.2.10:8443"
+hub_token: "${HUB_TOKEN}" # must match this spoke's token in the hub's config
+
+# The hub's own certificate, copied here out-of-band (it's self-signed —
+# see ARCHITECTURE.md "TLS" — so there's no certificate authority for this
+# to chain to). This spoke trusts exactly this certificate and no other;
+# verify it with `openssl x509 -in hub-cert.pem -noout -fingerprint -sha256`
+# against what the hub logged on its own startup before trusting it. Plain
+# `sha256sum` on this file will NOT match that fingerprint — it hashes the
+# raw PEM file bytes, not the parsed certificate, which is a different value.
+hub_tls_cert_file: /etc/acme-client/hub-cert.pem
+
+poll_interval: 15m
+request_timeout: 30s # bounds quick hub calls: due, checkin
+dns01_timeout: 3m # bounds dns01 present/cleanup relay calls (the hub's DNS provider can be slow, e.g. Route53's ~2min propagation wait)
+retry_backoff: 1h # local backoff after a failed issuance attempt, doubling each consecutive failure
+max_retry_backoff: 24h
+hook_timeout: 30s
+
+# Leave false unless this host's network can't make direct outbound DNS
+# queries to arbitrary authoritative nameservers (e.g. a firewall that only
+# permits DNS through a specific resolver). When true, lego's own
+# client-side propagation pre-check is skipped and Let's Encrypt's servers
+# do the real authoritative check instead.
+skip_propagation_check: false
+
+acme:
+  environment: staging # staging | production — required, no default. Validate against staging first.
+  email: admin@example.com
+
+data_dir: /var/lib/acme-client
+# db_path: /var/lib/acme-client/acme-client.db  # optional; defaults under data_dir
+
+certs:
+  - name: radius-cert # must match this cert's name in the hub's spokes.<this-spoke>.certs config
+    domains: [radius.example.com]
+    reload_hook: "systemctl restart freeradius"

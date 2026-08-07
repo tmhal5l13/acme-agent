@@ -1,0 +1,72 @@
+# cmd/acme-hub config. The hub never holds a private key or an issued
+# certificate — it tracks what spokes report, decides when they're due for
+# renewal, and relays DNS-01 challenges to the DNS providers it holds
+# credentials for. See ARCHITECTURE.md for the full request flow.
+
+listen_addr: "192.0.2.10:8443" # prefer a private/internal interface where your network allows it; TLS + the per-spoke bearer token are the real security boundary either way
+data_dir: /var/lib/acme-hub
+# db_path: /var/lib/acme-hub/acme-hub.db  # optional; defaults under data_dir
+
+# Optional: both default under data_dir/tls/. If no certificate exists at
+# that path yet, one is self-signed on first startup (see ARCHITECTURE.md
+# "TLS" and internal/selfsigned) — there's usually no reason to set these.
+# Every spoke must be given a copy of the resulting certificate to trust
+# (see deploy/spoke-config.example.yaml's hub_tls_cert_file); the hub logs
+# its SHA-256 fingerprint on every startup so you can verify the copy.
+# tls_cert_file: /var/lib/acme-hub/tls/cert.pem
+# tls_key_file: /var/lib/acme-hub/tls/key.pem
+
+acme_defaults:
+  renew_before: 720h # renew when a spoke's reported cert has <30 days left, unless overridden per-cert below
+
+# Optional: fires when a certificate's status transitions to "failed"
+# (alert) or from "failed" back to "active" (resolved) - not on every
+# checkin. See ARCHITECTURE.md "Admin notifications" for the full list of
+# environment variables passed to this command (ACME_SPOKE, ACME_CERT,
+# ACME_STATUS, ACME_PREVIOUS_STATUS, ACME_ERROR, ACME_NOT_AFTER).
+# notify_hook: "/etc/acme-hub/notify.sh"
+notify_timeout: 30s
+
+dns_providers:
+  route53_main:
+    type: route53
+    hosted_zone_id: "" # optional; leave blank to let lego look up the zone by domain
+    region: "" # optional; leave blank to use the AWS SDK's own resolution
+    # No access_key_id/secret_access_key fields on purpose: credentials come
+    # from the standard AWS SDK credential chain (env vars, ~/.aws/credentials,
+    # or an IAM role), not from this file.
+
+  cloudflare_main:
+    type: cloudflare
+    api_token: "${CLOUDFLARE_API_TOKEN}"
+
+  godaddy_main:
+    type: godaddy
+    api_key: "${GODADDY_API_KEY}"
+    api_secret: "${GODADDY_API_SECRET}"
+
+  pdns_main:
+    type: pdns
+    api_url: "http://127.0.0.1:8081"
+    api_key: "${PDNS_API_KEY}"
+    server_name: "" # optional; defaults to "localhost", PowerDNS's own default virtual server ID
+
+# Each spoke is one bearer token plus the exact set of certificates (name +
+# domains + which dns_providers entry to use) that token is authorized to
+# act on. A spoke can never request a DNS-01 change, due-check, or checkin
+# for anything outside its own list here.
+spokes:
+  freeradius-spoke:
+    token: "${SPOKE_FREERADIUS_TOKEN}"
+    certs:
+      - name: radius-cert
+        domains: [radius.example.com]
+        dns_provider: route53_main
+        # renew_before: 720h  # optional; overrides acme_defaults.renew_before for just this cert
+
+  nginx-spoke:
+    token: "${SPOKE_NGINX_TOKEN}"
+    certs:
+      - name: nginx-cert
+        domains: [example.com, "*.example.com"]
+        dns_provider: cloudflare_main
