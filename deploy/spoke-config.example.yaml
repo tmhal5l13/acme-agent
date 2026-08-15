@@ -32,7 +32,7 @@ skip_propagation_check: false
 
 acme:
   environment: staging # staging | production — required, no default. Validate against staging first.
-  email: admin@example.com
+  email: admin@example.com # optional — RFC 8555's contact field isn't required to register; omit to skip it entirely
 
 data_dir: /var/lib/acme-client
 # db_path: /var/lib/acme-client/acme-client.db  # optional; defaults under data_dir

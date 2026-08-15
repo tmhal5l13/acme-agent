@@ -16,8 +16,16 @@ data_dir: /var/lib/acme-hub
 # tls_cert_file: /var/lib/acme-hub/tls/cert.pem
 # tls_key_file: /var/lib/acme-hub/tls/key.pem
 
+# Optional; only needed when listen_addr is a wildcard bind (e.g.
+# "0.0.0.0:8443") rather than one specific dialable interface. The
+# self-signed cert's identity comes from listen_addr's host by default,
+# which is wrong for a wildcard bind — spokes dial one real address, not
+# "0.0.0.0", so set that real address (hostname or IP) here instead.
+# tls_host: hub.example.com
+
 acme_defaults:
   renew_before: 720h # renew when a spoke's reported cert has <30 days left, unless overridden per-cert below
+  renewal_jitter: 48h # spreads renewals across a window instead of every cert converging on the same moment (see ARCHITECTURE.md "Renewal jitter"); only ever renews earlier than renew_before, never later
 
 # Optional: fires when a certificate's status transitions to "failed"
 # (alert) or from "failed" back to "active" (resolved) - not on every

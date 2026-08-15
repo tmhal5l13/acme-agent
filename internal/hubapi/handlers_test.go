@@ -145,3 +145,41 @@ func TestDue_PerCertRenewBeforeOverridesDefault(t *testing.T) {
 		t.Error("got due=true with a 1h renew_before override and 5 days left, want false")
 	}
 }
+
+// TestDue_JitterShiftsThresholdEarlierNeverLater proves jitter's direction
+// guarantee end-to-end through the real /due endpoint: an expiry in the
+// "gray zone" between the base renew_before and renew_before+jitter reads
+// as due only when jitter is enabled — confirming jitter is what moved the
+// threshold, not a coincidence, and that it only ever pulls due *earlier*.
+func TestDue_JitterShiftsThresholdEarlierNeverLater(t *testing.T) {
+	jitter := jitterFor("spoke-a", "cert-a", 48*time.Hour)
+	if jitter == 0 {
+		t.Skip("jitter happened to hash to exactly zero for this spoke/cert pair")
+	}
+	notAfter := time.Now().Add(30*24*time.Hour + jitter/2) // strictly inside the gray zone
+
+	cfgWithJitter := testConfig()
+	cfgWithJitter.ACMEDefaults.RenewalJitter = config.Duration(48 * time.Hour)
+	sWithJitter := newTestServer(t, cfgWithJitter, nil)
+	if err := sWithJitter.store.Checkin("spoke-a", "cert-a", time.Now(), notAfter, "s1", "active", nil); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+	resp := doRequest(sWithJitter, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var gotWithJitter dueResponse
+	json.NewDecoder(resp.Body).Decode(&gotWithJitter)
+	if !gotWithJitter.Due {
+		t.Error("got due=false in the jitter gray-zone with jitter enabled, want true")
+	}
+
+	cfgNoJitter := testConfig() // RenewalJitter left zero
+	sNoJitter := newTestServer(t, cfgNoJitter, nil)
+	if err := sNoJitter.store.Checkin("spoke-a", "cert-a", time.Now(), notAfter, "s1", "active", nil); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+	resp2 := doRequest(sNoJitter, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var gotNoJitter dueResponse
+	json.NewDecoder(resp2.Body).Decode(&gotNoJitter)
+	if gotNoJitter.Due {
+		t.Error("got due=true at the same expiry with jitter disabled, want false — the base renew_before alone should not trigger this")
+	}
+}

@@ -39,15 +39,17 @@ func (d Duration) Duration() time.Duration {
 // ACMEConfig selects the ACME CA and identity used for account registration.
 type ACMEConfig struct {
 	Environment string `yaml:"environment"` // "staging" or "production"
-	Email       string `yaml:"email"`
+	// Email is optional - RFC 8555's contact field isn't required to
+	// register an account, and lego omits Contact entirely when this is
+	// empty (see registration.registrar). Let's Encrypt no longer sends
+	// expiration notices to it either way; the only remaining use is as a
+	// CA-initiated security contact (e.g. mandatory revocation notices).
+	Email string `yaml:"email"`
 }
 
 func (a ACMEConfig) validate() error {
 	if a.Environment != "staging" && a.Environment != "production" {
 		return fmt.Errorf("acme.environment must be %q or %q, got %q", "staging", "production", a.Environment)
-	}
-	if a.Email == "" {
-		return fmt.Errorf("acme.email is required")
 	}
 	return nil
 }

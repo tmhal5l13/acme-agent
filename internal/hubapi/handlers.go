@@ -120,6 +120,10 @@ func (s *Server) handleDue(w http.ResponseWriter, r *http.Request) {
 	if renewBefore == 0 {
 		renewBefore = s.cfg.ACMEDefaults.RenewBefore.Duration()
 	}
+	// Jitter only ever widens the renewal window (renews *earlier*, never
+	// later), so it can't erode the safety margin renewBefore guarantees —
+	// see jitterFor and ACMEDefaultsConfig.RenewalJitter.
+	renewBefore += jitterFor(spokeID, cert.Name, s.cfg.ACMEDefaults.RenewalJitter.Duration())
 
 	state, err := s.store.Get(spokeID, cert.Name)
 	due := true // never checked in for this cert => nothing issued yet => due

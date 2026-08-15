@@ -114,9 +114,13 @@ func ensureTLS(cfg *config.HubConfig) error {
 		return fmt.Errorf("create tls_key_file directory: %w", err)
 	}
 
-	host, _, err := net.SplitHostPort(cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("parse listen_addr: %w", err)
+	host := cfg.TLSHost
+	if host == "" {
+		var err error
+		host, _, err = net.SplitHostPort(cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("parse listen_addr: %w", err)
+		}
 	}
 
 	if err := selfsigned.EnsureCert(cfg.TLSCertFile, cfg.TLSKeyFile, host); err != nil {

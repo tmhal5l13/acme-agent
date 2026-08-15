@@ -27,6 +27,19 @@ type HubConfig struct {
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 
+	// TLSHost is the address spokes actually dial — embedded as the
+	// self-signed certificate's SAN (see internal/selfsigned), since Go's
+	// TLS client verifies the presented certificate against the address it
+	// dialed, not just whether the certificate is trusted. Optional —
+	// defaults to ListenAddr's host portion, which is correct whenever
+	// ListenAddr is itself a specific, dialable interface. It's only
+	// required when ListenAddr is a wildcard bind (e.g. "0.0.0.0:8443",
+	// listening on every interface) while spokes reach the hub through one
+	// specific hostname or IP — that hostname belongs here instead, or the
+	// generated certificate ends up issued for the meaningless identity
+	// "0.0.0.0" and every spoke's TLS handshake fails.
+	TLSHost string `yaml:"tls_host"`
+
 	// NotifyHook is an optional shell command run when a certificate's
 	// status transitions to "failed" (alert) or from "failed" back to
 	// "active" (resolved) — see internal/hubapi's checkin handler for the
@@ -44,6 +57,26 @@ type HubConfig struct {
 // SpokeCertConfig.RenewBefore.
 type ACMEDefaultsConfig struct {
 	RenewBefore Duration `yaml:"renew_before"`
+
+	// RenewalJitter staggers exactly when each certificate starts being
+	// considered due, so a fleet of certificates issued around the same
+	// time doesn't all converge on renewing at the identical moment —
+	// the same "randomized renewal" practice Let's Encrypt's own client
+	// list requires, applied here at the hub (the scheduling authority)
+	// rather than per-spoke. Each certificate gets a jitter amount in
+	// [0, RenewalJitter) that's stable across checks (deterministically
+	// derived from spoke+cert name, not re-rolled every request — an
+	// unstable jitter would make "due" flip-flop between polls) and only
+	// ever makes a certificate due *earlier*, never later — it can't cut
+	// into the safety margin RenewBefore was set to guarantee.
+	//
+	// Left unset (zero), it defaults to defaultRenewalJitter like every
+	// other Duration field in this config — there's deliberately no way
+	// to fully disable it by setting 0, the same limitation every other
+	// field here already has (this project treats the zero value as
+	// "unset", not "explicitly disabled"). To make jitter negligible,
+	// set a very small nonzero value instead.
+	RenewalJitter Duration `yaml:"renewal_jitter"`
 }
 
 // SpokeEntry is one spoke's identity (its bearer token) and the certificates
@@ -68,6 +101,7 @@ type SpokeCertConfig struct {
 const (
 	defaultHubRenewBefore = 30 * 24 * time.Hour
 	defaultNotifyTimeout  = 30 * time.Second
+	defaultRenewalJitter  = 48 * time.Hour
 )
 
 // LoadHubConfig reads, expands, parses, and validates the hub's config file.
@@ -92,6 +126,9 @@ func (c *HubConfig) applyDefaults() {
 	}
 	if c.ACMEDefaults.RenewBefore == 0 {
 		c.ACMEDefaults.RenewBefore = Duration(defaultHubRenewBefore)
+	}
+	if c.ACMEDefaults.RenewalJitter == 0 {
+		c.ACMEDefaults.RenewalJitter = Duration(defaultRenewalJitter)
 	}
 	if c.NotifyTimeout == 0 {
 		c.NotifyTimeout = Duration(defaultNotifyTimeout)

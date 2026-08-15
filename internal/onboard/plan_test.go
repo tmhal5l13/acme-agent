@@ -73,6 +73,35 @@ func TestPlan_ExistingSpokeReusesToken(t *testing.T) {
 	}
 }
 
+// TestPlan_ExistingSpokeSpokeConfigIncludesAllCerts guards against
+// regenerating an existing spoke's config.yaml silently dropping its other
+// certificates — SpokeConfigYAML must list every cert the spoke manages,
+// not just the one being added in this call.
+func TestPlan_ExistingSpokeSpokeConfigIncludesAllCerts(t *testing.T) {
+	req := validRequest()
+	req.SpokeID = "existing-spoke"
+	req.CertName = "second-cert"
+	req.Domains = []string{"new.example.com"}
+
+	result, err := Plan(testHubConfig(), req)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if !strings.Contains(result.SpokeConfigYAML, "existing-cert") {
+		t.Error("SpokeConfigYAML is missing the spoke's pre-existing certificate — it would silently stop being managed locally")
+	}
+	if !strings.Contains(result.SpokeConfigYAML, "old.example.com") {
+		t.Error("SpokeConfigYAML is missing the pre-existing certificate's domain")
+	}
+	if !strings.Contains(result.SpokeConfigYAML, "second-cert") {
+		t.Error("SpokeConfigYAML is missing the newly added certificate")
+	}
+	if !strings.Contains(result.SpokeConfigYAML, "new.example.com") {
+		t.Error("SpokeConfigYAML is missing the newly added certificate's domain")
+	}
+}
+
 func TestPlan_DuplicateCertNameOnExistingSpokeErrors(t *testing.T) {
 	req := validRequest()
 	req.SpokeID = "existing-spoke"
@@ -116,7 +145,6 @@ func TestPlan_MissingRequiredFieldsError(t *testing.T) {
 		{"dns provider", func(r *Request) { r.DNSProvider = "" }},
 		{"hub url", func(r *Request) { r.HubURL = "" }},
 		{"hub tls cert file", func(r *Request) { r.HubTLSCertFile = "" }},
-		{"acme email", func(r *Request) { r.ACMEEmail = "" }},
 	}
 	for _, c := range cases {
 		req := base

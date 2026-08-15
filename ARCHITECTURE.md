@@ -88,6 +88,16 @@ copy, `internal/selfsigned.EnsureCert` is idempotent — it only generates
 one if the configured paths don't already have one, never on top of an
 existing one, so a hub restart doesn't quietly break every spoke.
 
+The certificate's SAN comes from `listen_addr`'s host by default, since
+that's normally also the address spokes dial. That breaks for a wildcard
+bind (`listen_addr: "0.0.0.0:8443"`, listening on every interface) — the
+generated certificate would be issued for the meaningless identity
+`0.0.0.0`, and Go's TLS client verifies the certificate against the address
+it actually dialed, so every spoke's handshake fails outright (`remote
+error: tls: bad certificate`, logged hub-side). `tls_host` overrides the
+SAN independently of `listen_addr` for exactly this case — set it to the
+real hostname or IP spokes connect through.
+
 The hub logs its certificate's SHA-256 fingerprint on every startup
 (`hub TLS certificate ready sha256_fingerprint=...`) — verify a copied
 certificate against it with:
@@ -278,6 +288,40 @@ notify_timeout: 30s
 that three consecutive `"failed"` checkins in a row fire the hook exactly
 once, not three times, and that a `"failed"` → `"active"` recovery fires a
 second time with the reversed status pair.
+
+## Renewal jitter
+
+Let's Encrypt's own client-listing requirements ask that clients "perform
+routine renewals at randomized times, or encourage that configuration" —
+so that many independent installations don't all converge on renewing at
+the same predictable moment and spike Let's Encrypt's (and your DNS
+provider's) infrastructure. Without this, a fleet of certificates issued
+around the same time would all cross their `renew_before` threshold on the
+same day, generating a burst against the hub, the DNS provider, and Let's
+Encrypt all at once.
+
+`acme_defaults.renewal_jitter` (default `48h`) adds a stagger to *when*
+each certificate starts being considered due — computed in `handleDue`
+(`internal/hubapi/jitter.go`), not per-spoke, since the hub is the
+scheduling authority. Two properties make this safe rather than just
+random:
+
+- **Only ever earlier, never later.** Jitter is *added* to `renew_before`,
+  widening the window rather than shifting it — a certificate can become
+  due somewhat ahead of the configured threshold, never behind it. It
+  can't erode the safety margin `renew_before` was set to guarantee.
+- **Stable per certificate, not re-rolled per request.** The jitter for a
+  given spoke+cert is deterministic (`hash(spokeID + "/" + certName)`
+  mapped into `[0, renewal_jitter)`), so the same certificate always gets
+  the same offset. A random value re-rolled on every `/due` call would
+  make a certificate's due status flip-flop between polls — this
+  guarantees different certificates spread out relative to each other
+  while any single certificate's due-ness is consistent from one check to
+  the next.
+
+Like every other `Duration` field in this config, `0` means "unset, use
+the default" rather than "explicitly disabled" — there's no way to fully
+turn jitter off, only make it negligible with a very small nonzero value.
 
 ## Known gaps
 

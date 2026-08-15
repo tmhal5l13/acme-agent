@@ -69,9 +69,6 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 	if req.HubTLSCertFile == "" {
 		return nil, fmt.Errorf("hub tls cert file is required")
 	}
-	if req.ACMEEmail == "" {
-		return nil, fmt.Errorf("acme email is required")
-	}
 	if req.ACMEEnv != "staging" && req.ACMEEnv != "production" {
 		return nil, fmt.Errorf("acme environment must be %q or %q, got %q", "staging", "production", req.ACMEEnv)
 	}
@@ -104,7 +101,7 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 		IsNewSpoke:      !spokeExists,
 		HubEnvVarName:   envVar,
 		HubConfigYAML:   buildHubConfigYAML(req, envVar, !spokeExists),
-		SpokeConfigYAML: buildSpokeConfigYAML(req),
+		SpokeConfigYAML: buildSpokeConfigYAML(req, existing.Certs),
 	}, nil
 }
 
@@ -133,7 +130,19 @@ func writeCertBlock(b *strings.Builder, req Request, indent string) {
 	fmt.Fprintf(b, "%s  dns_provider: %s\n", indent, req.DNSProvider)
 }
 
-func buildSpokeConfigYAML(req Request) string {
+// buildSpokeConfigYAML emits every certificate this spoke will manage, not
+// just the one being added: existingCerts (the spoke's other certs, already
+// on the hub) plus req's new one. Without this, regenerating the config for
+// an existing spoke's second or third certificate would silently produce a
+// spoke config.yaml that only lists the newest cert, dropping the others
+// from local management entirely.
+//
+// existingCerts carries no reload_hook — that field is spoke-local only
+// (see SpokeLocalCertConfig) and never appears in the hub's own config, so
+// Plan has no way to know what an existing cert's hook already is. Those
+// entries get the same commented-out placeholder a fresh cert with no
+// ReloadHook gets; the operator re-adds the real command by hand.
+func buildSpokeConfigYAML(req Request, existingCerts []config.SpokeCertConfig) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "hub_url: %q\n", req.HubURL)
 	fmt.Fprintf(&b, "hub_token: \"${HUB_TOKEN}\"\n")
@@ -143,6 +152,11 @@ func buildSpokeConfigYAML(req Request) string {
 	fmt.Fprintf(&b, "  email: %s\n\n", req.ACMEEmail)
 	fmt.Fprintf(&b, "data_dir: /var/lib/acme-client\n\n")
 	fmt.Fprintf(&b, "certs:\n")
+	for _, c := range existingCerts {
+		fmt.Fprintf(&b, "  - name: %s\n", c.Name)
+		fmt.Fprintf(&b, "    domains: [%s]\n", strings.Join(c.Domains, ", "))
+		fmt.Fprintf(&b, "    # reload_hook: \"systemctl reload nginx\" # carry over this cert's real hook from its previous config.yaml — not visible from the hub's config\n")
+	}
 	fmt.Fprintf(&b, "  - name: %s\n", req.CertName)
 	fmt.Fprintf(&b, "    domains: [%s]\n", strings.Join(req.Domains, ", "))
 	if req.ReloadHook != "" {
