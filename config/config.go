@@ -81,6 +81,17 @@ type DNSProviderConfig struct {
 	// "localhost", PowerDNS's own default virtual server ID.
 	APIURL     string `yaml:"api_url"`
 	ServerName string `yaml:"server_name"`
+
+	// rfc2136 (TSIG-authenticated dynamic DNS updates - BIND, Windows AD
+	// DNS, etc.). Nameserver is the authoritative server's host:port to
+	// send UPDATE messages to (e.g. "127.0.0.1:53"). TSIGAlgorithm is
+	// optional; lego defaults to HMAC-SHA1 if left blank - prefer setting
+	// it explicitly (e.g. "hmac-sha256.") to match whatever algorithm the
+	// TSIG key was actually generated with.
+	Nameserver    string `yaml:"nameserver"`
+	TSIGKey       string `yaml:"tsig_key"`
+	TSIGSecret    string `yaml:"tsig_secret"`
+	TSIGAlgorithm string `yaml:"tsig_algorithm"`
 }
 
 // loadYAML reads path, expands ${VAR} references against the process

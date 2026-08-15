@@ -59,6 +59,13 @@ dns_providers:
     api_key: "${PDNS_API_KEY}"
     server_name: "" # optional; defaults to "localhost", PowerDNS's own default virtual server ID
 
+  bind_main:
+    type: rfc2136
+    nameserver: "127.0.0.1:53" # host:port of the authoritative server to send UPDATE messages to
+    tsig_key: "${BIND_TSIG_KEY_NAME}" # the key name, not the secret
+    tsig_secret: "${BIND_TSIG_SECRET}"
+    tsig_algorithm: "hmac-sha256." # trailing dot required; matches whatever algorithm the key was generated with (see tsig-keygen)
+
 # Each spoke is one bearer token plus the exact set of certificates (name +
 # domains + which dns_providers entry to use) that token is authorized to
 # act on. A spoke can never request a DNS-01 change, due-check, or checkin

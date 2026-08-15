@@ -17,6 +17,7 @@ func TestNew_KnownTypesBuildWithoutError(t *testing.T) {
 		{Type: "route53"},
 		{Type: "godaddy", APIKey: "dummy", APISecret: "dummy"},
 		{Type: "pdns", APIKey: "dummy", APIURL: "http://127.0.0.1:1"},
+		{Type: "rfc2136", Nameserver: "127.0.0.1:53", TSIGKey: "dummy", TSIGSecret: "ZHVtbXk=", TSIGAlgorithm: "hmac-sha256."},
 	}
 	for _, cfg := range cases {
 		if _, err := New(cfg); err != nil {

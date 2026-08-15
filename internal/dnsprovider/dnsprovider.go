@@ -13,6 +13,7 @@ import (
 	"github.com/go-acme/lego/v4/providers/dns/cloudflare"
 	"github.com/go-acme/lego/v4/providers/dns/godaddy"
 	"github.com/go-acme/lego/v4/providers/dns/pdns"
+	"github.com/go-acme/lego/v4/providers/dns/rfc2136"
 	"github.com/go-acme/lego/v4/providers/dns/route53"
 
 	"acme-agent/config"
@@ -53,6 +54,16 @@ func New(cfg config.DNSProviderConfig) (challenge.Provider, error) {
 			pdnsCfg.ServerName = cfg.ServerName // else lego's own default of "localhost" applies
 		}
 		return pdns.NewDNSProviderConfig(pdnsCfg)
+
+	case "rfc2136":
+		r2Cfg := rfc2136.NewDefaultConfig()
+		r2Cfg.Nameserver = cfg.Nameserver
+		r2Cfg.TSIGKey = cfg.TSIGKey
+		r2Cfg.TSIGSecret = cfg.TSIGSecret
+		if cfg.TSIGAlgorithm != "" {
+			r2Cfg.TSIGAlgorithm = cfg.TSIGAlgorithm // else lego's own default of HMAC-SHA1 applies
+		}
+		return rfc2136.NewDNSProviderConfig(r2Cfg)
 
 	default:
 		return nil, fmt.Errorf("unknown dns provider type %q", cfg.Type)
