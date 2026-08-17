@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -21,6 +22,37 @@ type checkinRequest struct {
 	Error     string    `json:"error"`
 }
 
+// validate rejects a checkin that's malformed or internally inconsistent
+// before it ever reaches storage — not a substitute for actually verifying
+// the reported certificate (the hub has no independent way to confirm
+// NotBefore/NotAfter/Serial correspond to a real certificate at all; that
+// would need the spoke to submit the certificate itself, e.g. a SHA-256
+// fingerprint, not just self-reported fields — see "Known gaps"). This
+// only catches internally-inconsistent or nonsensical values: a status
+// outside the two the real client ever sends, an "active" checkin with no
+// serial, or a validity window that doesn't make sense on its own terms
+// (not_before on or after not_after). "failed" intentionally isn't held to
+// the same requirements — internal/spokeagent's fail() reports it with a
+// zero NotBefore/NotAfter/Serial, since there's no newly-issued
+// certificate to describe.
+func (r checkinRequest) validate() error {
+	if r.Status != "active" && r.Status != "failed" {
+		return fmt.Errorf("status must be %q or %q, got %q", "active", "failed", r.Status)
+	}
+	if r.Status == "active" {
+		if r.Serial == "" {
+			return fmt.Errorf("serial is required when status is %q", "active")
+		}
+		if r.NotBefore.IsZero() || r.NotAfter.IsZero() {
+			return fmt.Errorf("not_before and not_after are required when status is %q", "active")
+		}
+		if !r.NotBefore.Before(r.NotAfter) {
+			return fmt.Errorf("not_before must be before not_after")
+		}
+	}
+	return nil
+}
+
 // handleCheckin records what a spoke reports about one of its own
 // certificates after an issuance/renewal attempt (successful or not).
 func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +65,11 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	var req checkinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := req.validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

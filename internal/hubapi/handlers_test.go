@@ -81,6 +81,61 @@ func TestCheckin_InvalidBody(t *testing.T) {
 	}
 }
 
+func TestCheckin_UnknownStatusRejected(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: time.Now(), NotAfter: time.Now().Add(60 * 24 * time.Hour),
+		Serial: "abc123", Status: "banana",
+	})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 400 {
+		t.Fatalf("got status %d, want 400 for an unrecognized status value", resp.Code)
+	}
+}
+
+func TestCheckin_ActiveWithoutSerialRejected(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: time.Now(), NotAfter: time.Now().Add(60 * 24 * time.Hour),
+		Status: "active", // Serial deliberately omitted
+	})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 400 {
+		t.Fatalf("got status %d, want 400 for an active checkin with no serial", resp.Code)
+	}
+}
+
+// TestCheckin_ActiveWithNotBeforeNotAfterNonsenseRejected guards against a
+// validity window that couldn't correspond to any real certificate,
+// regardless of what NotAfter alone might suggest about renewal timing.
+func TestCheckin_ActiveWithNotBeforeNotAfterNonsenseRejected(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	now := time.Now()
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: now, NotAfter: now.Add(-time.Hour), // after before before
+		Serial: "abc123", Status: "active",
+	})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 400 {
+		t.Fatalf("got status %d, want 400 for not_after before not_before", resp.Code)
+	}
+}
+
+// TestCheckin_FailedStatusDoesNotRequireCertFields proves the validation
+// added above doesn't break the real client: internal/spokeagent's fail()
+// reports "failed" checkins with a zero NotBefore/NotAfter/Serial (there's
+// no newly-issued certificate to describe), and that must keep working.
+func TestCheckin_FailedStatusDoesNotRequireCertFields(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, Status: "failed", Error: "dns01 present failed",
+	})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 204 {
+		t.Fatalf("got status %d, want 204 for a failed checkin with no cert fields, body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestDue_NeverCheckedIn(t *testing.T) {
 	s := newTestServer(t, testConfig(), nil)
 	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)

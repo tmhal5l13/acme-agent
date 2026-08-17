@@ -123,7 +123,7 @@ above is computed from.
 | `internal/hubclient` | spoke | The spoke's HTTP client for the hub's API, plus `DNS01Provider` — a `challenge.Provider` that relays `Present`/`CleanUp` through the hub instead of calling a real DNS API |
 | `internal/spokeagent` | spoke | The polling loop: ask the hub if due, apply local retry backoff, run the issue/install pipeline, report back |
 | `internal/acmeclient` | spoke | Drives `lego`: ACME account registration/reuse, `Issue()` |
-| `internal/certwriter` | spoke | Atomically writes `privkey.pem`/`cert.pem`/`fullchain.pem` to disk with correct permissions (`0600`/`0644`) |
+| `internal/certwriter` | spoke | Atomically installs a certificate bundle (`privkey.pem`/`cert.pem`/`fullchain.pem`) as a unit via a versioned directory + atomic symlink swap — see "Certificate installation" |
 | `internal/hook` | both | Runs an operator-configured shell command bounded by a timeout (`Cmd.WaitDelay` — see the package for why a plain context timeout isn't enough): a certificate's `reload_hook` (spoke) or the hub's `notify_hook` (hub) |
 | `internal/store` | spoke | SQLite: the spoke's own ACME account + its local view of what it currently has installed |
 
@@ -363,26 +363,58 @@ never registers an ACME account or talks to a CA directly) open that up:
 None of this has been tested against a real non-Let's-Encrypt CA yet —
 see "Known gaps."
 
+## Certificate installation
+
+**`reload_hook` and anything else consuming an installed certificate must
+read from `<data_dir>/certs/<name>/current/{privkey.pem,cert.pem,fullchain.pem}`
+— not `<data_dir>/certs/<name>/` directly.** That's a real change to the
+on-disk layout, not an implementation detail: earlier versions wrote the
+three files straight into `certs/<name>/`, and anything pointed at that
+path directly needs updating.
+
+The reason is bundle atomicity. `privkey.pem` only means something paired
+with the `cert.pem` it was issued alongside — writing three separate
+files in sequence, even with each individual write itself atomic, leaves
+a real window where a crash between file N and file N+1 strands a new
+key next to an old, non-matching certificate. `internal/certwriter.Write`
+avoids this the standard way a whole directory's contents get swapped
+atomically: the complete new bundle is written into its own versioned
+directory (`certs/<name>/versions/<timestamp>-<random>/`), then `current`
+is atomically repointed at it — renaming a symlink is a single-syscall
+atomic replace, the same guarantee the per-file writes already relied on,
+just applied to the bundle as a whole instead of to each file
+individually. Nothing ever observes a partially-swapped bundle.
+
+Old versions under `versions/` are not cleaned up automatically and
+accumulate across renewals — at roughly one renewal every 60-90 days this
+isn't a practical problem on any realistic timeline, but an operator
+wanting to reclaim the space would need to prune it themselves.
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary, per-cert
-  domain authorization, checkin, due including per-cert policy override,
-  dns01 relay, notify_hook transition detection — all via real HTTP
-  requests against a real temp-file SQLite store, with a fake
-  `challenge.Provider` standing in for a real DNS API), **`internal/spokeagent`**
-  (backoff math, cert-time parsing, the local backoff-skip decision via a
-  fake hub over `httptest`), **`internal/onboard`** (including a round-trip
-  through the real config loader), **`internal/hubclient`** (real TLS
-  handshakes against a real listener using a real `internal/selfsigned`
-  certificate — including that a client pinned to the *wrong* certificate
-  is actually rejected, not just that TLS is nominally on),
-  **`internal/selfsigned`** (SAN correctness for both IP and DNS hosts,
-  key file permissions, idempotency across restarts), `internal/hook`, and
-  `internal/dnsprovider`. Everything else — `internal/store`,
-  `internal/acmeclient`, `internal/certwriter`, and all three `cmd/`
-  binaries — has been verified only by running real binaries against a
-  real Route53 zone and Let's Encrypt staging during development, not by
-  `go test`.
+  domain authorization, checkin including input validation, due including
+  per-cert policy override, dns01 relay, notify_hook transition detection
+  — all via real HTTP requests against a real temp-file SQLite store, with
+  a fake `challenge.Provider` standing in for a real DNS API),
+  **`internal/spokeagent`** (backoff math, cert-time parsing, the local
+  backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
+  (including a round-trip through the real config loader), **`internal/hubclient`**
+  (real TLS handshakes against a real listener using a real
+  `internal/selfsigned` certificate — including that a client pinned to
+  the *wrong* certificate is actually rejected, not just that TLS is
+  nominally on), **`internal/selfsigned`** (SAN correctness for both IP
+  and DNS hosts, key file permissions, idempotency across restarts),
+  **`internal/certwriter`** (bundle-swap atomicity via the `current`
+  symlink, permissions, and that a renewal fully replaces what `current`
+  resolves to without touching the prior version's own files), `config`
+  (loading/validation, including the mutual-exclusivity and pairing rules
+  around ACME CA flexibility — see above), `internal/acmeclient` (directory
+  URL resolution for `environment` vs `directory_url`, private-CA trust),
+  `internal/hook`, and `internal/dnsprovider`. Everything else —
+  `internal/store` and all three `cmd/` binaries — has been verified only
+  by running real binaries against real infrastructure during development,
+  not by `go test`.
 - **No hot-reload.** Both `acme-onboard` output and a hand-edit alike
   require restarting the hub to take effect — config is loaded once at
   startup.

@@ -22,11 +22,19 @@ func notifyTestConfig(marker string) *config.HubConfig {
 	return cfg
 }
 
+// checkin submits a checkin for the given status, with realistic complete
+// cert fields when status is "active" (required since validate()) and none
+// when "failed" — matching exactly what internal/spokeagent's ProcessCert
+// and fail() respectively send in real operation.
 func checkin(t *testing.T, s *Server, status string) {
 	t.Helper()
-	body, _ := json.Marshal(checkinRequest{
-		Domains: []string{"example.com"}, NotAfter: time.Now().Add(60 * 24 * time.Hour), Status: status,
-	})
+	req := checkinRequest{Domains: []string{"example.com"}, Status: status}
+	if status == "active" {
+		req.NotBefore = time.Now()
+		req.NotAfter = time.Now().Add(60 * 24 * time.Hour)
+		req.Serial = "abc123"
+	}
+	body, _ := json.Marshal(req)
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
 	if resp.Code != 204 {
 		t.Fatalf("checkin(%s): got status %d, want 204, body=%s", status, resp.Code, resp.Body.String())
