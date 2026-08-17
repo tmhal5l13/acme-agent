@@ -59,6 +59,35 @@ See `ARCHITECTURE.md`'s "Known gaps" for the full list, including exactly
 which packages have automated test coverage and which have only been
 verified by hand.
 
+## How this was built
+
+I'm not a programmer. This project was directed entirely in natural
+language — architecture decisions, requirements, and scope were mine;
+Claude (Anthropic's AI) wrote every line of code. I'm disclosing that
+plainly rather than leaving it to be discovered, because I think it should
+be a baseline expectation, not a caveat buried in a commit message.
+
+What I'd rather you evaluate this on than the fact of AI authorship: the
+project's git history is the actual record of how it was built, and it
+holds up to scrutiny. Bugs were found by deploying across real,
+multi-host infrastructure and watching things actually break — not
+assumed away — and each one got a regression test, not just a fix (see
+the `tls_host` commit for an example: a real TLS handshake failure, found
+only because the hub and spokes were running on separate real hosts,
+fixed with both the config change and a test proving the failure mode).
+The [Status](#status) section above says plainly what hasn't been
+verified yet, rather than hiding it. `govulncheck` and the race detector
+have both been run against this codebase, not just `go build`.
+
+One real limitation worth being direct about: I can't personally review
+a pull request by reading its code. What I can and will do is require
+that any change — mine or a contributor's — passes the existing test
+suite, `go vet`, and `govulncheck`, and gets an AI-assisted review before
+merging. That's a real form of review, just not one that depends on code
+literacy I don't have. If that's not a review process you trust, that's a
+completely reasonable reason to hold off on this project, or to review
+changes yourself before pulling them into anything you run.
+
 ## Quick start
 
 Three binaries: the hub, the spoke client, and an onboarding helper.
