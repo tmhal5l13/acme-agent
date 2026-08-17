@@ -346,6 +346,24 @@ turn jitter off, only make it negligible with a very small nonzero value.
 - **No hot-reload.** Both `acme-onboard` output and a hand-edit alike
   require restarting the hub to take effect — config is loaded once at
   startup.
+- **Behavior at high spoke counts is unverified.** Two concentration
+  points exist by design, both worth naming explicitly rather than
+  leaving implicit: `internal/hubstore`'s SQLite backend serializes
+  writes (every checkin is one, regardless of how many spokes are
+  checking in concurrently), and every spoke's DNS-01 challenge relays
+  through the hub to the actual DNS provider, whose own API rate limits
+  this project has no control over. `ACMEDefaultsConfig.RenewalJitter`
+  spreads *when* certificates come due specifically to avoid all of them
+  clustering on the same renewal window, but it doesn't raise either
+  ceiling — it only reduces how often the fleet is likely to approach
+  them at once. This project's own testing has only ever run 2 spokes
+  concurrently, nowhere near enough to know where the real limit is. One
+  factor cuts the other direction, though: each spoke registers and owns
+  its own ACME account (see the package map's `internal/store` and
+  `internal/acmeclient` rows above) rather than sharing one centrally,
+  which spreads exposure to Let's Encrypt's own per-account rate limits
+  across accounts instead of concentrating it the way a single shared
+  account would.
 - **GoDaddy is blocked on an upstream `lego` limitation, not just
   untested.** GoDaddy's modernized API requires a Bearer-token Personal
   Access Token; `lego`'s GoDaddy provider (checked against both the

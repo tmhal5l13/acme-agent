@@ -34,6 +34,17 @@ relying on this, know what hasn't been exercised yet:
   certificate written to disk and the hub's state updated to match.
 - **Two spokes have run concurrently against one hub** without issue, but
   this wasn't a rigorous concurrency stress test.
+- **Behavior at high spoke counts is unverified**, distinct from the point
+  above. Two known concentration points exist by design: the hub's SQLite
+  store serializes writes (every checkin is one), and every spoke's DNS-01
+  challenge funnels through the hub's relay to the actual DNS provider,
+  whose own API rate limits are outside this project's control. Renewal
+  jitter spreads *when* certificates come due so they don't all cluster at
+  once, but doesn't change either ceiling. Where the real limit is — tens
+  of spokes or thousands — has never been tested. Worth noting the
+  opposite is also true in one respect: each spoke owns its own ACME
+  account rather than sharing one, which spreads exposure to Let's
+  Encrypt's own per-account rate limits rather than concentrating it.
 - **`reload_hook` has never run against a real service.** It's unit-tested
   only — no live test in this project's history has actually installed a
   certificate and reloaded something that consumes it.
