@@ -56,6 +56,13 @@ acme:
 data_dir: /var/lib/acme-client
 # db_path: /var/lib/acme-client/acme-client.db  # optional; defaults under data_dir
 
+# Each cert is installed under <data_dir>/certs/<name>/current/
+# {privkey.pem,cert.pem,fullchain.pem} — reload_hook (and whatever config
+# file points your actual service at these certs, e.g. FreeRADIUS's
+# eap.conf or nginx's ssl_certificate directive) should point there, not
+# at <data_dir>/certs/<name>/ directly. See ARCHITECTURE.md "Certificate
+# installation" for why "current" is a symlink rather than the files
+# living there directly.
 certs:
   - name: radius-cert # must match this cert's name in the hub's spokes.<this-spoke>.certs config
     domains: [radius.example.com]
