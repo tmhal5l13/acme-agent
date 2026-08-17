@@ -1,4 +1,4 @@
-module acme-agent
+module github.com/tmhal5l13/acme-agent
 
 go 1.26.6
 

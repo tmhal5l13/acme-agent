@@ -16,7 +16,7 @@ import (
 	"github.com/go-acme/lego/v4/providers/dns/rfc2136"
 	"github.com/go-acme/lego/v4/providers/dns/route53"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 // New builds the DNS-01 challenge.Provider for the given named provider

@@ -22,10 +22,10 @@ import (
 	"syscall"
 	"time"
 
-	"acme-agent/config"
-	"acme-agent/internal/hubapi"
-	"acme-agent/internal/hubstore"
-	"acme-agent/internal/selfsigned"
+	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/hubapi"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
+	"github.com/tmhal5l13/acme-agent/internal/selfsigned"
 )
 
 func main() {

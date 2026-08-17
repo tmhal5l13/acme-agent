@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 // notifyTestConfig is testConfig with a notify_hook that appends

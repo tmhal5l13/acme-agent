@@ -7,8 +7,8 @@ import (
 
 	"github.com/go-acme/lego/v4/challenge"
 
-	"acme-agent/config"
-	"acme-agent/internal/hubstore"
+	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
 
 // fakeDNSProvider records every Present/CleanUp call it receives instead of

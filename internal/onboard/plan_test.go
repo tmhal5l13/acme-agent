@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 func testHubConfig() *config.HubConfig {

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"acme-agent/config"
-	"acme-agent/internal/hubclient"
-	"acme-agent/internal/selfsigned"
-	"acme-agent/internal/store"
+	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/hubclient"
+	"github.com/tmhal5l13/acme-agent/internal/selfsigned"
+	"github.com/tmhal5l13/acme-agent/internal/store"
 )
 
 // newTestHubClient builds a hubclient.Client for these tests. hubclient.New

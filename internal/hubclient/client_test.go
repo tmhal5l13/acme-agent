@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"acme-agent/internal/selfsigned"
+	"github.com/tmhal5l13/acme-agent/internal/selfsigned"
 )
 
 // startTLSServer runs a real TLS server (mirroring exactly how cmd/acme-hub

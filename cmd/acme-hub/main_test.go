@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 func parseCert(t *testing.T, path string) *x509.Certificate {

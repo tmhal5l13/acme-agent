@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 // Request describes the certificate being onboarded.

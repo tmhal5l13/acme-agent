@@ -3,7 +3,7 @@ package dnsprovider
 import (
 	"testing"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 func TestNew_KnownTypesBuildWithoutError(t *testing.T) {

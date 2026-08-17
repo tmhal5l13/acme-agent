@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 var (

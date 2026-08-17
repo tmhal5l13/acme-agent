@@ -8,7 +8,7 @@ import (
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
 
-	"acme-agent/internal/store"
+	"github.com/tmhal5l13/acme-agent/internal/store"
 )
 
 // GetOrRegisterAccount loads the persisted ACME account for caDirectoryURL,

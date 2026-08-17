@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"acme-agent/internal/hook"
-	"acme-agent/internal/hubstore"
+	"github.com/tmhal5l13/acme-agent/internal/hook"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
 
 type checkinRequest struct {

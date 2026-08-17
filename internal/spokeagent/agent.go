@@ -16,12 +16,12 @@ import (
 
 	"github.com/go-acme/lego/v4/challenge/dns01"
 
-	"acme-agent/config"
-	"acme-agent/internal/acmeclient"
-	"acme-agent/internal/certwriter"
-	"acme-agent/internal/hook"
-	"acme-agent/internal/hubclient"
-	"acme-agent/internal/store"
+	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/acmeclient"
+	"github.com/tmhal5l13/acme-agent/internal/certwriter"
+	"github.com/tmhal5l13/acme-agent/internal/hook"
+	"github.com/tmhal5l13/acme-agent/internal/hubclient"
+	"github.com/tmhal5l13/acme-agent/internal/store"
 )
 
 // Agent holds everything the polling loop needs: the spoke's own desired

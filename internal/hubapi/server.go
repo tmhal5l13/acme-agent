@@ -9,9 +9,9 @@ import (
 
 	"github.com/go-acme/lego/v4/challenge"
 
-	"acme-agent/config"
-	"acme-agent/internal/dnsprovider"
-	"acme-agent/internal/hubstore"
+	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/dnsprovider"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
 
 // Server holds everything request handlers need: the hub's desired-state

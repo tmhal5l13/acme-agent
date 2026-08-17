@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 func doRequest(s *Server, method, path, token string, body []byte) *httptest.ResponseRecorder {
