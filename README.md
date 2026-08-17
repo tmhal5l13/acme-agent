@@ -73,10 +73,15 @@ relying on this, know what hasn't been exercised yet:
   other provider (Cloudflare, GoDaddy, PowerDNS, rfc2136) takes its
   credentials directly from its own named config entry instead, so
   multiple distinct credential sets for those already work today.
-- **The ACME CA is hardcoded to Let's Encrypt** — no configurable directory
-  URL yet, so no private CA or other public ACME CA support. No External
-  Account Binding (EAB) support either, which several CAs (including some
-  private CA setups) require for account registration.
+- **CA flexibility is implemented but unverified against a real second CA.**
+  `acme.directory_url` points at any ACME-compliant CA (public or private),
+  `acme.ca_cert_file` trusts a private CA's own TLS certificate on its API
+  endpoint, and `acme.eab_key_id`/`acme.eab_hmac_key` support External
+  Account Binding for CAs that require it (some private CA setups, and
+  some public ones — Google Trust Services, notably). All three are
+  unit-tested in isolation, but every live test in this project's history
+  has used Let's Encrypt staging — nothing has actually registered an
+  account or issued a certificate against a second CA end-to-end yet.
 
 See `ARCHITECTURE.md`'s "Known gaps" for the full list, including exactly
 which packages have automated test coverage and which have only been

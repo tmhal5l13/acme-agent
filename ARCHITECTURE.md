@@ -323,6 +323,46 @@ Like every other `Duration` field in this config, `0` means "unset, use
 the default" rather than "explicitly disabled" — there's no way to fully
 turn jitter off, only make it negligible with a very small nonzero value.
 
+## ACME CA flexibility
+
+`acme.environment` (`staging`/`production`) still selects Let's Encrypt's
+own two directory URLs by default, unchanged from before this existed. But
+Let's Encrypt was never a protocol requirement, just this project's
+original scope — three fields on `ACMEConfig` (spoke config only; the hub
+never registers an ACME account or talks to a CA directly) open that up:
+
+- **`directory_url`** points at any ACME-compliant CA's directory
+  endpoint instead — public or private (e.g. a self-hosted
+  [step-ca](https://smallstep.com/docs/step-ca/) instance). Mutually
+  exclusive with `environment`; `config.ACMEConfig.validate()` rejects
+  both being set, since a silent "one wins" would be a confusing way to
+  fail. Resolved in `internal/acmeclient.DirectoryURL`.
+- **`ca_cert_file`** trusts a private CA's own TLS certificate on its ACME
+  API endpoint — worth being precise that this is a *different* trust
+  relationship than the certificates this project requests from that CA.
+  A public CA's API endpoint is already covered by the OS trust store; a
+  private CA's usually isn't, and without this, the spoke's own attempt to
+  *reach* the CA over HTTPS fails before ACME's own protocol-level trust
+  (the certificate being issued) is ever relevant. Built via lego's own
+  exported `lego.CreateCertPool` (`internal/acmeclient.httpClientFor`),
+  used for both account registration (`account.go`) and issuance
+  (`manager.go`) — the same private CA gets called for both, so both need
+  the same transport trust.
+- **`eab_key_id` / `eab_hmac_key`** — External Account Binding (RFC 8555
+  §7.3.4), required by some CAs to gate account registration: both some
+  private CA setups (as a deliberate enrollment control) and some public
+  ones (Google Trust Services, notably, despite being free via ACME).
+  Optional, and must be set together or not at all —
+  `config.ACMEConfig.validate()` enforces that pairing, since submitting
+  only one to the CA would surface as a remote, harder-to-diagnose
+  rejection instead of a clear local config error. When set,
+  `registerAccount` (`account.go`) calls lego's
+  `RegisterWithExternalAccountBinding` instead of the plain `Register` —
+  a completely different registration call, not a flag on the same one.
+
+None of this has been tested against a real non-Let's-Encrypt CA yet —
+see "Known gaps."
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary, per-cert
@@ -414,11 +454,10 @@ turn jitter off, only make it negligible with a very small nonzero value.
   entry, independent of the process environment, so multiple distinct
   credential sets for those providers already work today without any
   code change.
-- **The ACME CA is hardcoded to Let's Encrypt.** `internal/acmeclient`'s
-  directory-URL selection only recognizes `"staging"`/`"production"`,
-  mapped to Let's Encrypt's own two directory URLs — there's no way to
-  point this project at a different ACME CA (public or private), no way
-  to trust a private CA's own TLS certificate on its API endpoint (a
-  different trust relationship than the certificates being issued), and
-  no External Account Binding (EAB) support, which some CAs require for
-  account registration regardless of CA type.
+- **CA flexibility (`directory_url`, `ca_cert_file`, EAB — see "ACME CA
+  flexibility" above) is implemented but has never been exercised against
+  a real non-Let's-Encrypt CA.** Every live test in this project's history
+  has used Let's Encrypt staging. The new code paths (custom directory
+  URL, private-CA transport trust, `RegisterWithExternalAccountBinding`)
+  are unit-tested in isolation, but nothing has actually registered an
+  account or issued a certificate against a second CA end-to-end.

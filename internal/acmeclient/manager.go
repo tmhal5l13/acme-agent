@@ -7,6 +7,8 @@ import (
 	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
+
+	"github.com/tmhal5l13/acme-agent/config"
 )
 
 // Issue obtains a new certificate for domains via DNS-01, using dnsProvider
@@ -28,9 +30,21 @@ import (
 // certificate alone — certwriter is responsible for assembling fullchain.pem
 // from Certificate + IssuerCertificate, which keeps the on-disk file
 // contents explicit rather than implicit in an SDK flag.
-func Issue(user *User, caDirectoryURL string, dnsProvider challenge.Provider, domains []string, challengeOpts ...dns01.ChallengeOption) (*certificate.Resource, error) {
+//
+// acmeCfg is only consulted for CACertFile (see httpClientFor) — the same
+// private-CA transport trust used for account registration applies equally
+// here, since this is another round of calls to that same CA's API.
+func Issue(user *User, caDirectoryURL string, acmeCfg config.ACMEConfig, dnsProvider challenge.Provider, domains []string, challengeOpts ...dns01.ChallengeOption) (*certificate.Resource, error) {
 	cfg := lego.NewConfig(user)
 	cfg.CADirURL = caDirectoryURL
+
+	httpClient, err := httpClientFor(acmeCfg)
+	if err != nil {
+		return nil, err
+	}
+	if httpClient != nil {
+		cfg.HTTPClient = httpClient
+	}
 
 	client, err := lego.NewClient(cfg)
 	if err != nil {
