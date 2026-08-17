@@ -69,20 +69,25 @@ func (s *Store) MarkIssued(name string, notBefore, notAfter time.Time, serialNum
 // MarkFailed records a failed issuance/renewal attempt: status becomes
 // "failed", the failure streak increments (driving the scheduler's
 // exponential backoff), and the error is recorded for operator visibility.
-func (s *Store) MarkFailed(name string, attemptErr error) error {
+// Returns the failure streak's new value (after this increment) so callers
+// can report it to the hub without a separate read — see
+// internal/spokeagent's fail(), which is the only caller that needs it.
+func (s *Store) MarkFailed(name string, attemptErr error) (int, error) {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`
+	var consecutiveFailures int
+	err := s.db.QueryRow(`
 		UPDATE certificate_state
 		SET status = 'failed',
 		    last_attempt_at = ?, last_error = ?,
 		    consecutive_failures = consecutive_failures + 1,
 		    updated_at = ?
-		WHERE name = ?`,
-		now, attemptErr.Error(), now, name)
+		WHERE name = ?
+		RETURNING consecutive_failures`,
+		now, attemptErr.Error(), now, name).Scan(&consecutiveFailures)
 	if err != nil {
-		return fmt.Errorf("mark failed for %q: %w", name, err)
+		return 0, fmt.Errorf("mark failed for %q: %w", name, err)
 	}
-	return nil
+	return consecutiveFailures, nil
 }
 
 // MarkHookResult records the outcome of the post-issuance reload hook,

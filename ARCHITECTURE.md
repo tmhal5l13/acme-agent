@@ -58,8 +58,9 @@ spoke                                   hub
   |   writes it to local disk, runs its local reload hook)
   |
   |--- POST /v1/certs/{name}/checkin --->|   spoke reports what it now has:
-  |    {domains, not_before, not_after,  |   SANs, expiry, serial, status
-  |     serial, status, error}           |
+  |    {domains, not_before, not_after,  |   SANs, expiry, serial, status,
+  |     serial, status, error,           |   and its own local failure streak
+  |     consecutive_failures}            |
 ```
 
 Only a bearer token (proving spoke identity) and an ACME challenge token
@@ -116,7 +117,7 @@ above is computed from.
 |---|---|---|
 | `config` | both | YAML config loading/validation for both binaries — `HubConfig`/`LoadHubConfig` and `SpokeConfig`/`LoadSpokeConfig`, sharing a `Duration` type and `${VAR}` env-expansion for secrets |
 | `internal/hubapi` | hub | HTTP handlers: bearer-token auth, per-spoke domain authorization, checkin, due, dns01 relay, notify_hook transition detection |
-| `internal/hubstore` | hub | SQLite: what spokes have last reported (`spoke_cert_state`) — observed state only; desired state (domains, DNS provider, policy) lives in the hub's config, not the DB |
+| `internal/hubstore` | hub | SQLite: what spokes have last reported (`spoke_cert_state`) — observed state only; desired state (domains, DNS provider, policy) lives in the hub's config, not the DB. Tracks a `schema_meta.version` and migrates an existing database forward on `Open` — see "Renewal health tracking" below |
 | `internal/dnsprovider` | hub | Builds a real `lego` DNS-01 `challenge.Provider` (Route53, Cloudflare, GoDaddy, PowerDNS) from config. The one package that ever touches DNS provider credentials |
 | `internal/selfsigned` | hub | Generates the hub's self-signed TLS certificate on first startup — see "TLS" above |
 | `internal/onboard` | `cmd/acme-onboard` | Validates a new spoke/certificate against the hub's current config and generates the matching hub-config snippet + spoke config.yaml — see "Onboarding a spoke" below |
@@ -390,13 +391,68 @@ accumulate across renewals — at roughly one renewal every 60-90 days this
 isn't a practical problem on any realistic timeline, but an operator
 wanting to reclaim the space would need to prune it themselves.
 
+## Renewal health tracking
+
+`spoke_cert_state` carries two columns beyond what a single checkin's status
+implies: `consecutive_failures` and `last_success_at`. Both exist because a
+single `"failed"` checkin, on its own, can't tell an operator (or the
+`renew_before` due-check) whether this is a certificate's first hiccup or
+its fifteenth in a row — and with certificate lifetimes shortening (see the
+CA/Browser Forum's cert-lifetime phase-down), that distinction matters more
+over time, not less.
+
+- `consecutive_failures` is the spoke's own local count (`internal/store`'s
+  `MarkFailed`, incremented per attempt via SQL `RETURNING` in one round
+  trip), reported to the hub on every failed checkin and reset to `0` on the
+  next successful one (`CheckinActive`). The hub trusts the spoke's count
+  rather than keeping its own separate tally, since the spoke is the one
+  actually attempting renewal and backing off between attempts.
+- `last_success_at` is set only by `CheckinActive`, never by `CheckinFailed`
+  — so it stays a genuine "last time this actually worked," distinct from
+  `last_checkin_at` (which updates on every checkin, successful or not).
+
+`hubstore.Store` exposes this as two separate methods, `CheckinActive` and
+`CheckinFailed`, rather than one method branching internally on status. This
+split fixes a real bug an earlier single-method version had: a failed
+checkin's request necessarily carries zero-valued `not_before`/`not_after`
+(a spoke's `fail()` has no new certificate to report), and unconditionally
+writing those over the previous row would have made the hub forget the real
+expiry of whatever certificate is still installed and still valid on the
+spoke. `CheckinFailed` only ever touches `status`, `last_checkin_at`,
+`last_error`, and `consecutive_failures` — never the fields that describe
+the certificate itself. `internal/hubstore`'s tests prove this directly:
+an active checkin followed by a failed one must leave `not_before`,
+`not_after`, and `serial_number` byte-for-byte unchanged. The same
+correctness requirement is why `notifyIfTransitioned`'s `ACME_NOT_AFTER`
+(see "Admin notifications" above) is read back from storage after the
+checkin completes rather than taken from the incoming request directly — on
+a transition into `"failed"`, the request's own `not_after` is legitimately
+zero, but the preserved, stored value is exactly what an alert firing at
+that moment needs.
+
+`spoke_cert_state` gained these two columns via a real schema migration —
+the first this project has needed. `hubstore.Open` reads
+`schema_meta.version`, and if it's behind `currentSchemaVersion`, runs the
+necessary `ALTER TABLE` statements and bumps the stored version, all before
+the store is usable. This runs on every startup and is a no-op once a
+database is already current, so there's no separate migration step to
+remember to run — `internal/hubstore`'s tests cover both the upgrade path
+(a hand-built pre-migration database survives with its data intact) and the
+idempotent path (reopening an already-current database).
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary, per-cert
   domain authorization, checkin including input validation, due including
   per-cert policy override, dns01 relay, notify_hook transition detection
-  — all via real HTTP requests against a real temp-file SQLite store, with
-  a fake `challenge.Provider` standing in for a real DNS API),
+  including that a failed checkin's notification carries the certificate's
+  real preserved expiry, not a zero value — all via real HTTP requests
+  against a real temp-file SQLite store, with a fake `challenge.Provider`
+  standing in for a real DNS API), **`internal/hubstore`** (the
+  `CheckinActive`/`CheckinFailed` split that keeps a failed renewal from
+  erasing a still-valid certificate's known expiry, the
+  failure-streak/last-success tracking, and the `schema_meta` migration
+  path against a hand-built pre-migration database),
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
   backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
   (including a round-trip through the real config loader), **`internal/hubclient`**
@@ -413,8 +469,8 @@ wanting to reclaim the space would need to prune it themselves.
   URL resolution for `environment` vs `directory_url`, private-CA trust),
   `internal/hook`, and `internal/dnsprovider`. Everything else —
   `internal/store` and all three `cmd/` binaries — has been verified only
-  by running real binaries against real infrastructure during development,
-  not by `go test`.
+  by running real binaries against real infrastructure (a real Route53
+  zone, Let's Encrypt staging) during development, not by `go test`.
 - **No hot-reload.** Both `acme-onboard` output and a hand-edit alike
   require restarting the hub to take effect — config is loaded once at
   startup.

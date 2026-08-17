@@ -125,6 +125,11 @@ type CheckinRequest struct {
 	Serial    string    `json:"serial"`
 	Status    string    `json:"status"` // "active" or "failed"
 	Error     string    `json:"error"`
+	// ConsecutiveFailures is only meaningful when Status is "failed" - the
+	// spoke's own local failure-streak count for this certificate (see
+	// internal/store.CertState.ConsecutiveFailures), so the hub can tell a
+	// cert's first failed attempt from its fifteenth.
+	ConsecutiveFailures int `json:"consecutive_failures"`
 }
 
 // Checkin reports req to the hub for certName.

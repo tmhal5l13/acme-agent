@@ -20,6 +20,12 @@ type checkinRequest struct {
 	Serial    string    `json:"serial"`
 	Status    string    `json:"status"`
 	Error     string    `json:"error"`
+	// ConsecutiveFailures is the spoke's own local failure-streak count
+	// (see internal/store.CertState.ConsecutiveFailures) for this
+	// certificate, only meaningful when Status is "failed" — reported so
+	// the hub can distinguish a cert's first hiccup from its fifteenth
+	// consecutive failure, which "status: failed" alone can't.
+	ConsecutiveFailures int `json:"consecutive_failures"`
 }
 
 // validate rejects a checkin that's malformed or internally inconsistent
@@ -73,11 +79,6 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var checkinErr error
-	if req.Error != "" {
-		checkinErr = errors.New(req.Error)
-	}
-
 	// Fetch the prior status before overwriting it, so a notify_hook (if
 	// configured) fires only on a *transition* into or out of "failed" —
 	// not on every checkin — see notifyIfTransitioned.
@@ -91,15 +92,43 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.Checkin(spokeID, cert.Name, req.NotBefore, req.NotAfter, req.Serial, req.Status, checkinErr); err != nil {
+	// CheckinActive and CheckinFailed are deliberately separate calls, not
+	// one method branching internally on req.Status: a failed checkin must
+	// never touch not_before/not_after/serial_number, which describe
+	// whatever certificate the spoke actually has installed right now, not
+	// the failed attempt — see CheckinFailed's own doc comment for why
+	// conflating the two used to silently lose that information.
+	if req.Status == "active" {
+		err = s.store.CheckinActive(spokeID, cert.Name, req.NotBefore, req.NotAfter, req.Serial)
+	} else {
+		var checkinErr error
+		if req.Error != "" {
+			checkinErr = errors.New(req.Error)
+		}
+		err = s.store.CheckinFailed(spokeID, cert.Name, checkinErr, req.ConsecutiveFailures)
+	}
+	if err != nil {
 		slog.Error("checkin", "spoke", spokeID, "name", cert.Name, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("checkin", "spoke", spokeID, "name", cert.Name, "status", req.Status, "not_after", req.NotAfter)
+	// req.NotAfter is only meaningful on an "active" checkin — a "failed"
+	// one legitimately carries a zero value (the spoke's fail() never sets
+	// it), but the certificate's real expiry didn't go anywhere; it's
+	// exactly what CheckinFailed just preserved in storage. Re-fetch rather
+	// than reason about which of req/previous applies, so the log line and
+	// the notify hook below always reflect the one authoritative value —
+	// this matters most on a transition into "failed", the moment an
+	// accurate expiry is most useful to whoever the notify hook alerts.
+	notAfter := req.NotAfter
+	if current, getErr := s.store.Get(spokeID, cert.Name); getErr == nil && current.NotAfter.Valid {
+		notAfter = current.NotAfter.Time
+	}
 
-	s.notifyIfTransitioned(r.Context(), spokeID, cert.Name, previousStatus, req)
+	slog.Info("checkin", "spoke", spokeID, "name", cert.Name, "status", req.Status, "not_after", notAfter)
+
+	s.notifyIfTransitioned(r.Context(), spokeID, cert.Name, previousStatus, req, notAfter)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -114,7 +143,7 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 // slow notify command adds that much latency to this one checkin request,
 // never more, and never blocks other requests (Go's http.Server handles
 // each concurrently).
-func (s *Server) notifyIfTransitioned(ctx context.Context, spokeID, certName, previousStatus string, req checkinRequest) {
+func (s *Server) notifyIfTransitioned(ctx context.Context, spokeID, certName, previousStatus string, req checkinRequest, notAfter time.Time) {
 	if s.cfg.NotifyHook == "" {
 		return
 	}
@@ -131,7 +160,7 @@ func (s *Server) notifyIfTransitioned(ctx context.Context, spokeID, certName, pr
 		"ACME_STATUS":          req.Status,
 		"ACME_PREVIOUS_STATUS": previousStatus,
 		"ACME_ERROR":           req.Error,
-		"ACME_NOT_AFTER":       req.NotAfter.Format(time.RFC3339),
+		"ACME_NOT_AFTER":       notAfter.Format(time.RFC3339),
 	}
 	if err := hook.RunWithEnv(ctx, s.cfg.NotifyHook, s.cfg.NotifyTimeout.Duration(), env); err != nil {
 		slog.Error("notify hook failed", "spoke", spokeID, "name", certName, "error", err)

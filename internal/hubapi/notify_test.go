@@ -131,6 +131,48 @@ func TestNotify_RecoveryFires(t *testing.T) {
 	}
 }
 
+// TestNotify_FailedCheckinReportsPreservedNotAfter proves the notify hook's
+// ACME_NOT_AFTER reflects the still-valid certificate's real, preserved
+// expiry on a transition into "failed" - not the zero value a failed
+// checkin's own request legitimately carries (fail() in internal/spokeagent
+// never populates NotAfter). This is the moment accurate expiry information
+// matters most to whatever the hook alerts, so a stale/empty value here
+// would be worse than no notification-content bug at all.
+func TestNotify_FailedCheckinReportsPreservedNotAfter(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	cfg := testConfig()
+	cfg.NotifyHook = `echo "$ACME_STATUS $ACME_NOT_AFTER" >> ` + marker
+	cfg.NotifyTimeout = config.Duration(2 * time.Second)
+	s := newTestServer(t, cfg, nil)
+
+	notAfter := time.Now().Add(60 * 24 * time.Hour).UTC().Truncate(time.Second)
+	activeBody, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: time.Now().UTC(), NotAfter: notAfter,
+		Serial: "abc123", Status: "active",
+	})
+	if resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", activeBody); resp.Code != 204 {
+		t.Fatalf("active checkin: got status %d, want 204, body=%s", resp.Code, resp.Body.String())
+	}
+
+	// A real failed checkin from a spoke never sets NotAfter - left zero here
+	// on purpose to reproduce that.
+	failedBody, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, Status: "failed", Error: "dns01 present failed",
+	})
+	if resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", failedBody); resp.Code != 204 {
+		t.Fatalf("failed checkin: got status %d, want 204, body=%s", resp.Code, resp.Body.String())
+	}
+
+	got := readMarkerLines(t, marker)
+	if len(got) != 1 {
+		t.Fatalf("got %d notify firings, want 1 (active->failed): %v", len(got), got)
+	}
+	want := "failed " + notAfter.Format(time.RFC3339)
+	if got[0] != want {
+		t.Errorf("got %q, want %q — ACME_NOT_AFTER must be the preserved real expiry, not empty/zero", got[0], want)
+	}
+}
+
 func TestNotify_DisabledByEmptyHook(t *testing.T) {
 	cfg := testConfig() // NotifyHook left empty
 	s := newTestServer(t, cfg, nil)
