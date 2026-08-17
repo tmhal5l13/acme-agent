@@ -61,6 +61,18 @@ relying on this, know what hasn't been exercised yet:
 - **No certificate-revocation checking** (CRL or otherwise) — a revoked
   certificate would only get renewed on its normal schedule, not
   detected and replaced early.
+- **Only one AWS identity per hub for Route53**, by deliberate design, not
+  oversight. Route53 credentials come from the AWS SDK's own credential
+  chain (environment, `~/.aws/credentials`, or an IAM role) rather than
+  from this project's config, per AWS's own guidance against long-lived
+  keys in application config — but since that resolution happens once per
+  process, every `route53_*` entry in the hub's config shares the same
+  identity regardless of how many are defined. This only matters for
+  Route53 zones split across AWS accounts that can't be unified under one
+  IAM principal; one account with multiple zones is unaffected. Every
+  other provider (Cloudflare, GoDaddy, PowerDNS, rfc2136) takes its
+  credentials directly from its own named config entry instead, so
+  multiple distinct credential sets for those already work today.
 - **The ACME CA is hardcoded to Let's Encrypt** — no configurable directory
   URL yet, so no private CA or other public ACME CA support. No External
   Account Binding (EAB) support either, which several CAs (including some

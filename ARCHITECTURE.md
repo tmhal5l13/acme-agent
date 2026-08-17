@@ -395,6 +395,25 @@ turn jitter off, only make it negligible with a very small nonzero value.
   this would need to be CRL-based — fetching the CRL named in the
   certificate's own `crlDistributionPoints` extension and checking the
   certificate's serial against it.
+- **Only one AWS identity per hub for Route53** — deliberate, not an
+  oversight. `internal/dnsprovider.New`'s `"route53"` case passes no
+  credentials of its own; `route53.NewDNSProviderConfig` resolves them via
+  the AWS SDK's own default chain (environment, `~/.aws/credentials`, or
+  an IAM role), which is exactly what the config's own comment on
+  `HostedZoneID`/`Region` documents — no `access_key_id`/`secret_access_key`
+  fields exist on purpose, per AWS's own guidance against long-lived keys
+  in application config. The consequence, a logical entailment of that
+  choice rather than something separately decided: since credential
+  resolution happens once per process, every `route53_*` entry in the
+  hub's config resolves to the same AWS identity, however many are
+  defined. This only matters for Route53 zones split across AWS accounts
+  that can't be unified under one IAM principal — one account with
+  multiple zones, scoped via one policy across several hosted-zone ARNs,
+  is unaffected. Every other provider (Cloudflare, GoDaddy, PowerDNS,
+  rfc2136) takes its credentials directly from its own named config
+  entry, independent of the process environment, so multiple distinct
+  credential sets for those providers already work today without any
+  code change.
 - **The ACME CA is hardcoded to Let's Encrypt.** `internal/acmeclient`'s
   directory-URL selection only recognizes `"staging"`/`"production"`,
   mapped to Let's Encrypt's own two directory URLs — there's no way to
