@@ -14,22 +14,46 @@ ended up this shape.
 
 ## Status
 
-Working and live-tested against real infrastructure (Route53 + Let's
-Encrypt staging, real TLS between hub and spoke, real systemd hardening
-directives), but young. Before relying on this, know what hasn't been
-exercised yet:
+Working and live-tested against real, multi-host infrastructure — hub and
+spokes on separate machines, real DNS-01 relay, real Let's Encrypt staging
+issuance and renewal, real systemd deployment as root — but young. Before
+relying on this, know what hasn't been exercised yet:
 
+- **Four of five DNS providers are proven end-to-end**: Route53,
+  Cloudflare, PowerDNS, and rfc2136 (BIND, TSIG-authenticated) have each
+  driven a real DNS-01 challenge and issued a real certificate. **GoDaddy
+  is currently blocked, not just untested**: `lego` (this project's ACME
+  library) only supports GoDaddy's legacy `sso-key` credentials, and
+  GoDaddy's modernized API requires a Bearer-token Personal Access Token
+  that `lego` has no support for as of this writing — GoDaddy support
+  won't work until that lands upstream.
 - **Let's Encrypt production has never been used** — every test so far has
   deliberately used staging.
-- **Cloudflare, GoDaddy, and PowerDNS have only been structurally
-  verified** (they construct without error); Route53 is the only DNS
-  provider actually proven end-to-end.
-- **Only ever tested with one spoke at a time.** The whole point of this
-  architecture is many spokes against one hub, but concurrent-spoke
-  behavior (including SQLite contention on the hub) is untested.
-- **No real systemd deployment yet** — hardening was verified rootless
-  (`systemd-run --user`) and syntax-checked (`systemd-analyze verify`) on a
-  dev machine, not run as root on an actual target host.
+- **A real renewal (not just initial issuance) has been verified** — a
+  certificate was forced due and actually renewed, with a genuinely new
+  certificate written to disk and the hub's state updated to match.
+- **Two spokes have run concurrently against one hub** without issue, but
+  this wasn't a rigorous concurrency stress test.
+- **`reload_hook` has never run against a real service.** It's unit-tested
+  only — no live test in this project's history has actually installed a
+  certificate and reloaded something that consumes it.
+- **`notify_hook` has never fired in a live run.** The transition-detection
+  logic it depends on *has* been exercised for real (a genuine "failed"
+  checkin occurred during development), but no hook was configured at the
+  time, so the actual notification path remains unverified end-to-end.
+- **No hub-side failure detection for a spoke that can't reach the hub at
+  all.** `notify_hook` only fires on an explicit "failed" checkin — a spoke
+  that can't reach the hub (network/firewall/DNS issue) has no way to
+  report that fact, and the hub currently has no proactive staleness check
+  to catch the silence. This is a real gap found during development, not a
+  hypothetical one.
+- **No certificate-revocation checking** (CRL or otherwise) — a revoked
+  certificate would only get renewed on its normal schedule, not
+  detected and replaced early.
+- **The ACME CA is hardcoded to Let's Encrypt** — no configurable directory
+  URL yet, so no private CA or other public ACME CA support. No External
+  Account Binding (EAB) support either, which several CAs (including some
+  private CA setups) require for account registration.
 
 See `ARCHITECTURE.md`'s "Known gaps" for the full list, including exactly
 which packages have automated test coverage and which have only been

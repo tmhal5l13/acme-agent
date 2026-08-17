@@ -346,3 +346,42 @@ turn jitter off, only make it negligible with a very small nonzero value.
 - **No hot-reload.** Both `acme-onboard` output and a hand-edit alike
   require restarting the hub to take effect — config is loaded once at
   startup.
+- **GoDaddy is blocked on an upstream `lego` limitation, not just
+  untested.** GoDaddy's modernized API requires a Bearer-token Personal
+  Access Token; `lego`'s GoDaddy provider (checked against both the
+  version this project pins and `lego`'s current upstream master) only
+  ever sends the legacy `sso-key` credential format against GoDaddy's v1
+  endpoints. Getting PAT support would mean `lego` migrating to GoDaddy's
+  v3 API entirely (different endpoint paths and response shapes, not just
+  a different auth header) — real provider work upstream, not a config
+  change here.
+- **`reload_hook` and `notify_hook` are both unit-tested only.** Neither
+  has been exercised against a real consuming service or a real firing in
+  a live deployment. `notify_hook`'s transition-detection logic has run
+  for real (a genuine "failed" checkin occurred during development), but
+  no hook was configured at the time to confirm the actual invocation
+  path.
+- **No hub-side staleness/expiry watchdog.** `notifyIfTransitioned` (see
+  "Admin notifications" above) only fires on an explicit "failed" checkin
+  arriving — by construction, a spoke that cannot reach the hub at all has
+  no way to report that fact to the one endpoint it can't reach. From the
+  hub's side, a spoke silently failing to connect looks identical to a
+  healthy spoke with nothing due yet. Closing this needs a periodic,
+  hub-initiated scan of `hubstore` for certificates whose expiry is
+  getting close or whose `last_checkin_at` is stale relative to how often
+  that spoke should be polling, independent of any checkin arriving.
+- **No certificate-revocation checking.** Nothing currently checks whether
+  an installed certificate has been revoked; a revoked certificate would
+  only be replaced on its normal renewal schedule. Let's Encrypt's OCSP
+  responders are fully retired (as of August 2025) in favor of CRLs, so
+  this would need to be CRL-based — fetching the CRL named in the
+  certificate's own `crlDistributionPoints` extension and checking the
+  certificate's serial against it.
+- **The ACME CA is hardcoded to Let's Encrypt.** `internal/acmeclient`'s
+  directory-URL selection only recognizes `"staging"`/`"production"`,
+  mapped to Let's Encrypt's own two directory URLs — there's no way to
+  point this project at a different ACME CA (public or private), no way
+  to trust a private CA's own TLS certificate on its API endpoint (a
+  different trust relationship than the certificates being issued), and
+  no External Account Binding (EAB) support, which some CAs require for
+  account registration regardless of CA type.
