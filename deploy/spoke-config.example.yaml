@@ -31,8 +31,27 @@ hook_timeout: 30s
 skip_propagation_check: false
 
 acme:
-  environment: staging # staging | production — required, no default. Validate against staging first.
+  environment: staging # staging | production — Let's Encrypt only. Mutually exclusive with directory_url below; set exactly one.
   email: admin@example.com # optional — RFC 8555's contact field isn't required to register; omit to skip it entirely
+
+  # Optional: point at any ACME-compliant CA instead of Let's Encrypt (public
+  # or private — e.g. a self-hosted step-ca). Mutually exclusive with
+  # environment above.
+  # directory_url: "https://ca.example.com/acme/directory"
+
+  # Optional: trust a private CA's own TLS certificate on its ACME API
+  # endpoint. A different trust relationship than the certificates this
+  # spoke requests from that CA — a public CA's API endpoint is already
+  # covered by the OS trust store; a private CA's usually isn't. Only
+  # meaningful alongside directory_url.
+  # ca_cert_file: /etc/acme-client/private-ca.pem
+
+  # Optional: External Account Binding (RFC 8555 §7.3.4), required by some
+  # CAs — both private CA setups and some public ones (e.g. Google Trust
+  # Services) — to gate account registration. Both issued by the CA out of
+  # band; must be set together or not at all.
+  # eab_key_id: "${ACME_EAB_KEY_ID}"
+  # eab_hmac_key: "${ACME_EAB_HMAC_KEY}"
 
 data_dir: /var/lib/acme-client
 # db_path: /var/lib/acme-client/acme-client.db  # optional; defaults under data_dir

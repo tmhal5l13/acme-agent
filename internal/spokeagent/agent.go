@@ -127,12 +127,12 @@ func backoffFor(consecutiveFailures int, retryBackoff, max time.Duration) time.D
 // ProcessCert runs the full issue/renew pipeline for one certificate
 // unconditionally, ignoring due/backoff.
 func (a *Agent) ProcessCert(ctx context.Context, cert config.SpokeLocalCertConfig) error {
-	dirURL, err := acmeclient.DirectoryURL(a.cfg.ACME.Environment)
+	dirURL, err := acmeclient.DirectoryURL(a.cfg.ACME)
 	if err != nil {
 		return a.fail(ctx, cert, err)
 	}
 
-	user, err := acmeclient.GetOrRegisterAccount(a.st, dirURL, a.cfg.ACME.Email)
+	user, err := acmeclient.GetOrRegisterAccount(a.st, dirURL, a.cfg.ACME)
 	if err != nil {
 		return a.fail(ctx, cert, fmt.Errorf("get account: %w", err))
 	}
@@ -144,7 +144,7 @@ func (a *Agent) ProcessCert(ctx context.Context, cert config.SpokeLocalCertConfi
 		challengeOpts = append(challengeOpts, dns01.DisableCompletePropagationRequirement())
 	}
 
-	certResource, err := acmeclient.Issue(user, dirURL, provider, cert.Domains, challengeOpts...)
+	certResource, err := acmeclient.Issue(user, dirURL, a.cfg.ACME, provider, cert.Domains, challengeOpts...)
 	if err != nil {
 		return a.fail(ctx, cert, fmt.Errorf("issue certificate: %w", err))
 	}
