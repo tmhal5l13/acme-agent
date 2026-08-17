@@ -185,11 +185,13 @@ func (a *Agent) ProcessCert(ctx context.Context, cert config.SpokeLocalCertConfi
 }
 
 func (a *Agent) fail(ctx context.Context, cert config.SpokeLocalCertConfig, attemptErr error) error {
-	if markErr := a.st.MarkFailed(cert.Name, attemptErr); markErr != nil {
+	consecutiveFailures, markErr := a.st.MarkFailed(cert.Name, attemptErr)
+	if markErr != nil {
 		slog.Error("record failure locally", "name", cert.Name, "error", markErr)
 	}
 	if checkinErr := a.checkin(ctx, cert.Name, hubclient.CheckinRequest{
 		Domains: cert.Domains, Status: "failed", Error: attemptErr.Error(),
+		ConsecutiveFailures: consecutiveFailures,
 	}); checkinErr != nil {
 		slog.Error("report failure to hub", "name", cert.Name, "error", checkinErr)
 	}

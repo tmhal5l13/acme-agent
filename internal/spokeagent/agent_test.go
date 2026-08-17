@@ -119,7 +119,7 @@ func TestProcessIfDue_SkipsWhenBackingOff(t *testing.T) {
 	if _, err := st.GetOrCreateCertState("test-cert"); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
-	if err := st.MarkFailed("test-cert", errors.New("simulated failure")); err != nil {
+	if _, err := st.MarkFailed("test-cert", errors.New("simulated failure")); err != nil {
 		t.Fatalf("seed failure: %v", err)
 	}
 
@@ -136,6 +136,64 @@ func TestProcessIfDue_SkipsWhenBackingOff(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("processIfDue returned an error: %v", err)
+	}
+}
+
+// TestFail_ReportsRealConsecutiveFailureCountToHub proves fail() sends the
+// spoke's actual local failure-streak count (post-increment) to the hub,
+// not just a fixed value or nothing at all — the hub has no other way to
+// distinguish a certificate's first failed attempt from its fifth without
+// this being reported accurately on every failed checkin.
+func TestFail_ReportsRealConsecutiveFailureCountToHub(t *testing.T) {
+	var capturedConsecutiveFailures = -1 // sentinel: checkin was never called
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/certs/test-cert/checkin" {
+			var req hubclient.CheckinRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode checkin body: %v", err)
+			}
+			capturedConsecutiveFailures = req.ConsecutiveFailures
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	if _, err := st.GetOrCreateCertState("test-cert"); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	// Two prior failures already on record, so the next one (inside fail(),
+	// below) must report 3 - proving the real, current count is used, not
+	// a value that happens to be right only for a cert's very first failure.
+	if _, err := st.MarkFailed("test-cert", errors.New("first")); err != nil {
+		t.Fatalf("seed first failure: %v", err)
+	}
+	if _, err := st.MarkFailed("test-cert", errors.New("second")); err != nil {
+		t.Fatalf("seed second failure: %v", err)
+	}
+
+	cfg := &config.SpokeConfig{RequestTimeout: config.Duration(5 * time.Second)}
+	agent := New(cfg, st, newTestHubClient(t, ts.URL))
+
+	returnedErr := agent.fail(context.Background(),
+		config.SpokeLocalCertConfig{Name: "test-cert", Domains: []string{"example.com"}},
+		errors.New("third"))
+	if returnedErr == nil {
+		t.Fatal("fail() returned nil, want the attempt error passed through")
+	}
+
+	if capturedConsecutiveFailures == -1 {
+		t.Fatal("hub never received a checkin")
+	}
+	if capturedConsecutiveFailures != 3 {
+		t.Errorf("got consecutive_failures %d reported to the hub, want 3", capturedConsecutiveFailures)
 	}
 }
 
