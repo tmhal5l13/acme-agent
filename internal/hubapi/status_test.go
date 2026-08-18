@@ -17,7 +17,7 @@ func statusTestConfig() *config.HubConfig {
 	cfg := testConfig()
 	cfg.StatusToken = "status-token"
 	cfg.Spokes["spoke-b"] = config.SpokeEntry{
-		Token: "token-b",
+		Tokens: []string{"token-b"},
 		Certs: []config.SpokeCertConfig{
 			{Name: "cert-b", Domains: []string{"other.example.com"}, DNSProvider: "fake"},
 		},

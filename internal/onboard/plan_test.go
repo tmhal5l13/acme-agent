@@ -18,7 +18,7 @@ func testHubConfig() *config.HubConfig {
 		},
 		Spokes: map[string]config.SpokeEntry{
 			"existing-spoke": {
-				Token: "existing-token-value",
+				Tokens: []string{"existing-token-value"},
 				Certs: []config.SpokeCertConfig{
 					{Name: "existing-cert", Domains: []string{"old.example.com"}, DNSProvider: "route53_main"},
 				},
@@ -204,5 +204,81 @@ func TestPlan_HubConfigYAMLContainsExpectedFields(t *testing.T) {
 		if !strings.Contains(result.HubConfigYAML, want) {
 			t.Errorf("hub config YAML missing %q:\n%s", want, result.HubConfigYAML)
 		}
+	}
+}
+
+func TestPlanRotation_UnknownSpokeErrors(t *testing.T) {
+	_, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "no-such-spoke"})
+	if err == nil {
+		t.Fatal("expected an error for a spoke not defined in the hub config, got nil")
+	}
+}
+
+func TestPlanRotation_MissingSpokeIDErrors(t *testing.T) {
+	_, err := PlanRotation(testHubConfig(), RotationRequest{})
+	if err == nil {
+		t.Fatal("expected an error for an empty spoke id, got nil")
+	}
+}
+
+// TestPlanRotation_GeneratesFreshTokenAndDistinctEnvVar proves the two
+// properties PlanRotation actually needs to guarantee: the new token is a
+// real, freshly generated credential (not a copy of anything already on
+// the spoke), and its ${VAR} name doesn't collide with the existing
+// token's env var name — see PlanRotation's doc comment on why a plain
+// envVarName(spokeID) would be wrong here.
+func TestPlanRotation_GeneratesFreshTokenAndDistinctEnvVar(t *testing.T) {
+	result, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+	if err != nil {
+		t.Fatalf("PlanRotation: %v", err)
+	}
+
+	if len(result.NewToken) != 64 { // 32 bytes hex-encoded, same as GenerateToken
+		t.Errorf("got new token length %d, want 64", len(result.NewToken))
+	}
+	if result.NewToken == "existing-token-value" {
+		t.Error("got the spoke's existing token back, want a freshly generated one")
+	}
+
+	wantPrefix := "SPOKE_EXISTING_SPOKE_TOKEN_"
+	if !strings.HasPrefix(result.HubEnvVarName, wantPrefix) {
+		t.Errorf("got env var name %q, want it to start with %q", result.HubEnvVarName, wantPrefix)
+	}
+	if result.HubEnvVarName == "SPOKE_EXISTING_SPOKE_TOKEN" {
+		t.Error("got the same env var name a fresh onboard would use, want one that can't collide with the existing token's env var")
+	}
+}
+
+// TestPlanRotation_DoesNotLeakExistingToken guards the specific security
+// property in PlanRotation's doc comment: the generated snippet must
+// never contain the spoke's actual existing secret value, only
+// instructions describing what to add.
+func TestPlanRotation_DoesNotLeakExistingToken(t *testing.T) {
+	result, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+	if err != nil {
+		t.Fatalf("PlanRotation: %v", err)
+	}
+	if strings.Contains(result.HubConfigYAML, "existing-token-value") {
+		t.Error("HubConfigYAML leaks the spoke's existing token value, want only instructions to add the new one")
+	}
+}
+
+// TestPlanRotation_SuccessiveCallsGenerateDistinctTokensAndEnvVars proves
+// calling PlanRotation twice in a row (e.g. an operator retrying) doesn't
+// hand back the same token or env var name each time.
+func TestPlanRotation_SuccessiveCallsGenerateDistinctTokensAndEnvVars(t *testing.T) {
+	first, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+	if err != nil {
+		t.Fatalf("first PlanRotation: %v", err)
+	}
+	second, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+	if err != nil {
+		t.Fatalf("second PlanRotation: %v", err)
+	}
+	if first.NewToken == second.NewToken {
+		t.Error("two successive calls generated the identical token")
+	}
+	if first.HubEnvVarName == second.HubEnvVarName {
+		t.Error("two successive calls generated the identical env var name")
 	}
 }

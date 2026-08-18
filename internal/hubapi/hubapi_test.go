@@ -45,7 +45,9 @@ func newTestServer(t *testing.T, cfg *config.HubConfig, providers map[string]cha
 
 	tokenToSpoke := make(map[string]string, len(cfg.Spokes))
 	for spokeID, spoke := range cfg.Spokes {
-		tokenToSpoke[spoke.Token] = spokeID
+		for _, token := range spoke.Tokens {
+			tokenToSpoke[token] = spokeID
+		}
 	}
 
 	return &Server{cfg: cfg, store: st, tokenToSpoke: tokenToSpoke, dnsProviders: providers}
@@ -63,7 +65,7 @@ func testConfig() *config.HubConfig {
 		RenewalLeaseDuration: config.Duration(15 * time.Minute),
 		Spokes: map[string]config.SpokeEntry{
 			"spoke-a": {
-				Token: "token-a",
+				Tokens: []string{"token-a"},
 				Certs: []config.SpokeCertConfig{
 					{Name: "cert-a", Domains: []string{"example.com", "*.example.com"}, DNSProvider: "fake"},
 				},

@@ -32,7 +32,12 @@ type Server struct {
 func NewServer(cfg *config.HubConfig, store *hubstore.Store) (*Server, error) {
 	tokenToSpoke := make(map[string]string, len(cfg.Spokes))
 	for spokeID, spoke := range cfg.Spokes {
-		tokenToSpoke[spoke.Token] = spokeID
+		// One entry per token, all pointing at the same spoke - this is
+		// what lets both an old and new token authenticate during a
+		// rotation grace period (see config.SpokeEntry.Tokens).
+		for _, token := range spoke.Tokens {
+			tokenToSpoke[token] = spokeID
+		}
 	}
 
 	dnsProviders := make(map[string]challenge.Provider, len(cfg.DNSProviders))

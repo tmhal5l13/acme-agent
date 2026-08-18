@@ -159,6 +159,77 @@ func TestNew_RejectsServerBelowTLS13(t *testing.T) {
 	}
 }
 
+// TestNew_TrustsMultipleConcatenatedCerts is the proof behind hub TLS
+// certificate rotation's "zero code change needed" claim (see
+// ARCHITECTURE.md "Hub TLS certificate rotation" and
+// internal/selfsigned.GenerateCert's doc comment): New passes the raw
+// bytes of caCertFile straight to
+// crypto/x509.CertPool.AppendCertsFromPEM, which already accepts a PEM
+// blob containing more than one certificate concatenated together. A
+// spoke whose trust file holds both the hub's current certificate and its
+// "next" one (mid-rotation) must therefore be able to connect to a server
+// presenting *either* one — not just whichever happened to be listed
+// first.
+func TestNew_TrustsMultipleConcatenatedCerts(t *testing.T) {
+	oldDir := t.TempDir()
+	oldCertPath := filepath.Join(oldDir, "cert.pem")
+	oldKeyPath := filepath.Join(oldDir, "key.pem")
+	if err := selfsigned.GenerateCert(oldCertPath, oldKeyPath, "127.0.0.1"); err != nil {
+		t.Fatalf("generate old cert: %v", err)
+	}
+
+	newDir := t.TempDir()
+	newCertPath := filepath.Join(newDir, "cert.pem")
+	newKeyPath := filepath.Join(newDir, "key.pem")
+	if err := selfsigned.GenerateCert(newCertPath, newKeyPath, "127.0.0.1"); err != nil {
+		t.Fatalf("generate new cert: %v", err)
+	}
+
+	oldCertPEM, err := os.ReadFile(oldCertPath)
+	if err != nil {
+		t.Fatalf("read old cert: %v", err)
+	}
+	newCertPEM, err := os.ReadFile(newCertPath)
+	if err != nil {
+		t.Fatalf("read new cert: %v", err)
+	}
+
+	// What a spoke's trust file looks like mid-rotation: both certs
+	// concatenated into one file, exactly as ARCHITECTURE.md's documented
+	// procedure instructs the operator to produce it.
+	combinedPath := filepath.Join(t.TempDir(), "combined-cert.pem")
+	combined := append(append([]byte{}, oldCertPEM...), newCertPEM...)
+	if err := os.WriteFile(combinedPath, combined, 0o644); err != nil {
+		t.Fatalf("write combined cert file: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		certPath string
+		keyPath  string
+	}{
+		{"server presents old cert", oldCertPath, oldKeyPath},
+		{"server presents new cert", newCertPath, newKeyPath},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			addr, shutdown := startTLSServer(t, c.certPath, c.keyPath)
+			defer shutdown()
+
+			client, err := New("https://"+addr, "test-token", combinedPath)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := client.Due(ctx, "some-cert"); err != nil {
+				t.Errorf("Due against a server presenting the %s cert while the client trusts both concatenated: %v", c.name, err)
+			}
+		})
+	}
+}
+
 func TestNew_UnreadableCertFileErrors(t *testing.T) {
 	_, err := New("https://127.0.0.1:1", "test-token", "/does/not/exist.pem")
 	if err == nil {
