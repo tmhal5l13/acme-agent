@@ -169,8 +169,8 @@ func (c *HubConfig) validate() error {
 
 		seenNames := make(map[string]bool, len(spoke.Certs))
 		for _, cert := range spoke.Certs {
-			if cert.Name == "" {
-				return fmt.Errorf("spokes[%s]: certs entry missing name", spokeID)
+			if err := validateCertName(cert.Name); err != nil {
+				return fmt.Errorf("spokes[%s]: %w", spokeID, err)
 			}
 			if seenNames[cert.Name] {
 				return fmt.Errorf("spokes[%s]: duplicate cert name %q", spokeID, cert.Name)
@@ -179,6 +179,11 @@ func (c *HubConfig) validate() error {
 
 			if len(cert.Domains) == 0 {
 				return fmt.Errorf("spokes[%s].certs[%s]: at least one domain is required", spokeID, cert.Name)
+			}
+			for _, d := range cert.Domains {
+				if err := validateDomain(d); err != nil {
+					return fmt.Errorf("spokes[%s].certs[%s]: %w", spokeID, cert.Name, err)
+				}
 			}
 			if _, ok := c.DNSProviders[cert.DNSProvider]; !ok {
 				return fmt.Errorf("spokes[%s].certs[%s]: dns_provider %q is not defined under dns_providers", spokeID, cert.Name, cert.DNSProvider)

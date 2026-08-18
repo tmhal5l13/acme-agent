@@ -142,6 +142,27 @@ across both files is a certificate's `name` — it's how the hub's
 per-cert authorization (`spokes.<id>.certs[].name`) lines up with what a
 spoke asks for (`certs[].name`).
 
+Secrets are interpolated via `${VAR}` — deliberately not bare `$VAR`
+(unlike `os.ExpandEnv`, which recognizes both with no way to disable one
+selectively): a bare `$` in a config value shouldn't silently trigger
+expansion just because it's followed by something that looks like an
+identifier. An unset `${VAR}` is a load-time error naming the missing
+variable, not a silent empty string — except inside a fully commented-out
+line (first non-whitespace character `#`), which both example configs
+above use to document optional fields without requiring their variables
+to be set.
+
+`validate()` (both configs) rejects a negative `Duration` on any field (a
+single choke point in `Duration.UnmarshalYAML` covers every one), a
+certificate `name` that isn't safe as a single filesystem path
+component — no `/`, and not `.`/`..`, since both configs' `cert.Name`
+ends up unguarded in `filepath.Join(dataDir, "certs", cert.Name)`
+(`internal/spokeagent.ProcessCert`) — and a domain string that's empty,
+contains whitespace/control characters, or is just a bare `*.` with
+nothing after it. Deliberately loose otherwise, not a full hostname
+validator: catching obvious operator typos matters more than rejecting
+every technically-unusual-but-legitimate hostname.
+
 ## Local dev / manual testing
 
 Both binaries take `--config <path>` and `--once` (run a single pass and
@@ -508,8 +529,14 @@ in isolation.
   symlink, permissions, that a renewal fully replaces what `current`
   resolves to without touching the prior version's own files, and that
   `Prune` never deletes whatever `current` points at regardless of its
-  age), `config` (loading/validation, including the mutual-exclusivity and
-  pairing rules around ACME CA flexibility — see above), `internal/acmeclient`
+  age), `config` (loading/validation for both `HubConfig` and `SpokeConfig`
+  — the mutual-exclusivity and pairing rules around ACME CA flexibility,
+  see above, plus negative-`Duration` rejection, cert-name path-safety,
+  domain well-formedness, and that `${VAR}`-only expansion actually
+  excludes bare `$VAR` and errors on a real unset reference while leaving
+  commented-out documentation alone — including round-trips through both
+  `deploy/*.example.yaml` files with real env vars set, not just
+  hand-built config structs), `internal/acmeclient`
   (directory URL resolution for `environment` vs `directory_url`,
   private-CA trust, and — gated behind `ACME_AGENT_E2E_TESTS`, see
   "End-to-end testing with Pebble" below — the actual

@@ -6,7 +6,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +29,15 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	parsed, err := time.ParseDuration(s)
 	if err != nil {
 		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	// time.ParseDuration itself accepts negative strings (e.g. "-1h")
+	// without complaint; nothing downstream (renewal-due comparisons,
+	// ticker intervals, context.WithTimeout) expects one, and a negative
+	// timeout in particular would fire immediately rather than never or
+	// eventually. Every Duration field in both configs flows through this
+	// one choke point, so rejecting it here covers all of them at once.
+	if parsed < 0 {
+		return fmt.Errorf("duration %q must not be negative", s)
 	}
 	*d = Duration(parsed)
 	return nil
@@ -134,7 +146,10 @@ func loadYAML[T any](path string) (*T, error) {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
-	expanded := os.ExpandEnv(string(raw))
+	expanded, err := expandEnv(string(raw))
+	if err != nil {
+		return nil, err
+	}
 
 	var cfg T
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
@@ -142,4 +157,91 @@ func loadYAML[T any](path string) (*T, error) {
 	}
 
 	return &cfg, nil
+}
+
+// envVarPattern matches only the braced ${VAR} form. Deliberately not
+// os.ExpandEnv (which also recognizes bare $VAR per Go stdlib semantics,
+// with no way to disable that selectively): a bare "$" in a config value
+// - a DNS provider secret, say - shouldn't silently trigger expansion just
+// because it's followed by something that looks like an identifier.
+var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnv replaces every ${VAR} in s with the named environment
+// variable's value, leaving bare $VAR untouched. Unlike os.ExpandEnv, an
+// unset variable is an error rather than a silent expansion to "" - a
+// config that references ${CLOUDFLARE_API_TOKEN} but has a typo'd or
+// forgotten env var should fail loudly at load time with that variable's
+// name, not produce a mysteriously-empty api_token that only surfaces as
+// a less specific validate() error (or, worse, no error at all, if the
+// field it landed in happens to have no required-non-empty check).
+//
+// Lines that are entirely a YAML comment (first non-whitespace character
+// is "#") are left untouched rather than scanned for ${VAR} - both
+// example configs in deploy/ document optional fields exactly this way
+// (e.g. "# eab_key_id: "${ACME_EAB_KEY_ID}""), and erroring on a
+// deliberately-unset variable an operator has no intention of using yet,
+// just because it appears inside its own commented-out documentation,
+// would make that documentation pattern unusable under the stricter,
+// error-on-unset behavior above.
+func expandEnv(s string) (string, error) {
+	lines := strings.Split(s, "\n")
+
+	var missing string
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		lines[i] = envVarPattern.ReplaceAllStringFunc(line, func(match string) string {
+			name := envVarPattern.FindStringSubmatch(match)[1]
+			if val, ok := os.LookupEnv(name); ok {
+				return val
+			}
+			if missing == "" {
+				missing = name
+			}
+			return match
+		})
+	}
+	if missing != "" {
+		return "", fmt.Errorf("environment variable %q is referenced in the config but not set", missing)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// validateDomain rejects obviously malformed domain strings - not a full
+// hostname validator (deliberately loose, so it can't false-reject a
+// legitimate but unusual hostname), just enough to catch the operator
+// typos an empty-slice check alone can't: a blank string sitting in the
+// domains list, or stray whitespace from a copy-paste. A single leading
+// "*." is explicitly allowed, since wildcard certificates are a normal,
+// already-tested case.
+func validateDomain(d string) error {
+	if d == "" {
+		return fmt.Errorf("domain must not be empty")
+	}
+	for _, r := range d {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("domain %q contains whitespace or control characters", d)
+		}
+	}
+	if strings.TrimPrefix(d, "*.") == "" {
+		return fmt.Errorf("domain %q has no hostname after the wildcard", d)
+	}
+	return nil
+}
+
+// validateCertName rejects a certificate name that isn't safe to use as a
+// single path component. Both configs' cert names end up in a filesystem
+// path unguarded (internal/spokeagent.ProcessCert does
+// filepath.Join(dataDir, "certs", cert.Name)), so a name like "../../etc"
+// or containing a "/" would otherwise pass validation and let certwriter
+// write outside the intended certs directory.
+func validateCertName(name string) error {
+	if name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("cert name %q must be a single path component - no \"/\", and not \".\" or \"..\"", name)
+	}
+	return nil
 }
