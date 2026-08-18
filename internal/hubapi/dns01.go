@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
+	"strings"
+	"time"
 
 	"github.com/go-acme/lego/v4/challenge"
 
@@ -17,6 +18,14 @@ type dns01Request struct {
 	Token   string `json:"token"`
 	KeyAuth string `json:"key_auth"`
 }
+
+// maxRequestBodyBytes bounds the request body every hub API handler that
+// decodes JSON will read (see handlers.go's handleCheckin too). Domain
+// names, ACME tokens, key authorizations, and checkin metadata are all
+// short strings - a legitimate request is well under 1KB - so this is
+// generous headroom, not a tight fit, while still bounding how much an
+// authenticated-but-misbehaving spoke can make the hub buffer per request.
+const maxRequestBodyBytes = 64 << 10
 
 // handleDNS01Present relays a spoke's DNS-01 Present call to the real DNS
 // provider, which stays entirely hub-side — this is the one place a
@@ -41,6 +50,7 @@ func (s *Server) handleDNS01(w http.ResponseWriter, r *http.Request, do func(cha
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req dns01Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -63,7 +73,7 @@ func (s *Server) handleDNS01(w http.ResponseWriter, r *http.Request, do func(cha
 		return
 	}
 
-	if err := do(provider, req); err != nil {
+	if err := withTimeout(s.cfg.DNSProviderTimeout.Duration(), func() error { return do(provider, req) }); err != nil {
 		slog.Error("dns01 request failed", "spoke", spokeID, "cert", cert.Name, "domain", req.Domain, "error", err)
 		http.Error(w, "dns provider request failed", http.StatusBadGateway)
 		return
@@ -78,6 +88,45 @@ func (s *Server) handleDNS01(w http.ResponseWriter, r *http.Request, do func(cha
 // otherwise-legitimate one — from requesting a DNS-01 change for a domain
 // it wasn't granted, by supplying an unexpected value in the request body
 // rather than the path.
+//
+// Comparison is case-insensitive with a trailing dot ignored on either
+// side. This is a robustness fix, not a security one: without it, the
+// match is exact-string, which fails *closed* on a mismatch (a spoke
+// requesting "Example.com" against a config listing "example.com" gets
+// rejected, never let through) - normalizing just stops an operator's
+// harmless capitalization or trailing-dot difference between the hub's
+// and spoke's config from breaking an otherwise-correctly-authorized
+// renewal.
 func domainAuthorized(cert config.SpokeCertConfig, domain string) bool {
-	return slices.Contains(cert.Domains, domain)
+	want := normalizeDomain(domain)
+	for _, d := range cert.Domains {
+		if normalizeDomain(d) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeDomain(d string) string {
+	return strings.ToLower(strings.TrimSuffix(d, "."))
+}
+
+// withTimeout runs fn, returning its error if it completes within
+// timeout. lego's challenge.Provider interface (Present/CleanUp) takes no
+// context.Context, and no context-aware variant exists in the pinned
+// lego version, so there's no way to pass a deadline into fn itself - the
+// only option is to run it in its own goroutine and stop waiting on it,
+// not to actually cancel it. That distinction matters: on timeout, fn
+// keeps running to completion (or failure) against the real DNS provider
+// in the background: this only stops the HTTP handler — and the spoke
+// waiting on it — from blocking indefinitely.
+func withTimeout(timeout time.Duration, fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("dns provider call timed out after %s", timeout)
+	}
 }

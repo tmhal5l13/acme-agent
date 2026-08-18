@@ -51,6 +51,18 @@ type HubConfig struct {
 	// mail, a webhook, ntfy.sh, or anything else.
 	NotifyHook    string   `yaml:"notify_hook"`
 	NotifyTimeout Duration `yaml:"notify_timeout"`
+
+	// DNSProviderTimeout bounds how long the hub waits on a single
+	// provider.Present/CleanUp call before giving up and returning an
+	// error to the requesting spoke (internal/hubapi/dns01.go) — lego's
+	// challenge.Provider interface takes no context, so there's no way to
+	// cancel the call itself; this only stops the HTTP handler from
+	// blocking indefinitely, it doesn't cancel the DNS provider request
+	// still running in the background. Matches the spoke's own
+	// DNS01Timeout default (3m, headroom beyond Route53's own ~2min
+	// propagation wait) since both bound the same underlying call from
+	// either side of the relay.
+	DNSProviderTimeout Duration `yaml:"dns_provider_timeout"`
 }
 
 // ACMEDefaultsConfig holds renewal policy defaults, overridable per cert via
@@ -99,9 +111,10 @@ type SpokeCertConfig struct {
 }
 
 const (
-	defaultHubRenewBefore = 30 * 24 * time.Hour
-	defaultNotifyTimeout  = 30 * time.Second
-	defaultRenewalJitter  = 48 * time.Hour
+	defaultHubRenewBefore     = 30 * 24 * time.Hour
+	defaultNotifyTimeout      = 30 * time.Second
+	defaultRenewalJitter      = 48 * time.Hour
+	defaultDNSProviderTimeout = 3 * time.Minute
 )
 
 // LoadHubConfig reads, expands, parses, and validates the hub's config file.
@@ -132,6 +145,9 @@ func (c *HubConfig) applyDefaults() {
 	}
 	if c.NotifyTimeout == 0 {
 		c.NotifyTimeout = Duration(defaultNotifyTimeout)
+	}
+	if c.DNSProviderTimeout == 0 {
+		c.DNSProviderTimeout = Duration(defaultDNSProviderTimeout)
 	}
 	if c.TLSCertFile == "" {
 		c.TLSCertFile = filepath.Join(c.DataDir, "tls", "cert.pem")

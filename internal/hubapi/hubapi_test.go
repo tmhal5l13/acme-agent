@@ -57,7 +57,8 @@ func newTestServer(t *testing.T, cfg *config.HubConfig, providers map[string]cha
 // RenewBefore) where they need different behavior.
 func testConfig() *config.HubConfig {
 	return &config.HubConfig{
-		ACMEDefaults: config.ACMEDefaultsConfig{RenewBefore: config.Duration(30 * 24 * time.Hour)},
+		ACMEDefaults:       config.ACMEDefaultsConfig{RenewBefore: config.Duration(30 * 24 * time.Hour)},
+		DNSProviderTimeout: config.Duration(3 * time.Minute),
 		Spokes: map[string]config.SpokeEntry{
 			"spoke-a": {
 				Token: "token-a",

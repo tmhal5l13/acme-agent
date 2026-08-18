@@ -25,6 +25,17 @@ var (
 // certificate named in the request's {name} path value. Every handler
 // calls this first — it's simultaneously authentication (is this a real
 // spoke?) and authorization (is this spoke allowed to touch this cert?).
+//
+// The map lookup below is deliberately not a crypto/subtle.ConstantTimeCompare
+// loop over every known token. That pattern exists to fix a specific
+// timing-leak shape: a naive token == candidate comparison that
+// short-circuits on the first mismatched byte, letting an attacker who
+// can measure response timing recover a token one byte at a time. A Go
+// map lookup doesn't have that shape — matching is by hash of the full
+// key, not a byte-by-byte compare against each candidate — so there's no
+// per-byte timing signal to leak in the first place, and switching to a
+// linear constant-time scan would only add real cost (O(n) in the number
+// of spokes per request) for a leak that isn't there.
 func (s *Server) authorize(r *http.Request) (spokeID string, cert config.SpokeCertConfig, err error) {
 	token, ok := bearerToken(r)
 	if !ok {
