@@ -641,6 +641,20 @@ in isolation.
   for real (a genuine "failed" checkin occurred during development), but
   no hook was configured at the time to confirm the actual invocation
   path.
+- **Self-reported checkin fields aren't cryptographically verified.**
+  `handleCheckin` trusts `not_before`/`not_after`/`serial` exactly as a
+  spoke reports them — the hub has no independent way to confirm they
+  correspond to a real certificate at all, short of the spoke submitting
+  the certificate itself (e.g. a SHA-256 fingerprint the hub could verify
+  independently, not just self-reported fields). Concretely: a spoke with
+  a stolen or leaked bearer token could suppress renewal indefinitely by
+  reporting a far-future `not_after` on every checkin, since `handleDue`'s
+  renewal-due calculation trusts it verbatim. `checkinRequest.validate()`
+  mitigates the specific far-future version of this — rejecting a
+  `not_after` more than 398 days past `not_before`, the longest lifetime
+  any public CA is currently permitted to issue — but a spoke can still
+  lie within that plausible range. Closing this fully needs the stronger
+  fix described above, not just a sanity bound.
 - **No hub-side staleness/expiry watchdog.** `notifyIfTransitioned` (see
   "Admin notifications" above) only fires on an explicit "failed" checkin
   arriving — by construction, a spoke that cannot reach the hub at all has
