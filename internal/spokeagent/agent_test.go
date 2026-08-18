@@ -92,17 +92,17 @@ func TestParseCertTimes_InvalidPEM(t *testing.T) {
 }
 
 // TestProcessIfDue_SkipsWhenBackingOff proves the local retry-backoff gate
-// works without touching real ACME/DNS infrastructure: the fake hub always
-// says "due", local state records a very recent failure, and the test
-// fails immediately if the agent makes *any* hub call beyond the initial
-// due-check (which would mean it proceeded into the real issuance pipeline
-// instead of backing off).
+// works without touching real ACME/DNS infrastructure or the hub at all -
+// local state records a very recent failure, and the test fails if the
+// agent makes *any* hub call whatsoever. Backoff is deliberately checked
+// before ever calling the hub's /due (which, since it also atomically
+// claims a renewal lease when it answers "due" - see internal/hubapi's
+// handleDue - would otherwise claim a lease for an attempt that's about
+// to be skipped anyway, left dangling until it self-expired). The fake
+// hub server below has no handler at all for /due, on purpose: if
+// anything reaches it, that alone is the bug this test exists to catch.
 func TestProcessIfDue_SkipsWhenBackingOff(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/certs/test-cert/due" {
-			json.NewEncoder(w).Encode(map[string]bool{"due": true})
-			return
-		}
 		t.Errorf("unexpected call to hub while backing off: %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))

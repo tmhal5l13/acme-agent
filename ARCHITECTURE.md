@@ -626,6 +626,61 @@ stale, not a real problem, and it avoids coupling this feature to
 arrives for a cert the watchdog had flagged) fires a symmetric
 `ACME_STATUS=active ACME_PREVIOUS_STATUS=stale` notification.
 
+## Renewal lease/claim
+
+Nothing previously stopped two overlapping attempts for the same
+certificate from both proceeding with a real ACME order at once — e.g.
+two processes of what's supposed to be one spoke running concurrently
+after a botched restart, or a slow first attempt still in flight when its
+own next poll tick would otherwise start a second one. `handleDue` now
+closes that: answering "due" also atomically claims a renewal lease
+(`hubstore.Store.Claim`), and a second caller sees "not due" for as long
+as that claim is held and unexpired — even if the certificate's own
+expiry would otherwise say it's due.
+
+**The wire protocol didn't need to change at all to express this.**
+`dueResponse{Due bool}` is exactly the same shape it always was — from a
+caller's perspective, "due" already meant "yes, go ahead," and that
+remains exactly true whether the reason for "not due" is genuinely not
+due yet or someone else already has it claimed. No lease token, no
+separate claim/release endpoint, nothing for the spoke to explicitly
+manage.
+
+The claim is released two ways, one primary and one as a backstop:
+
+- **`CheckinActive`/`CheckinFailed` both release it unconditionally**, as
+  part of the same statement that records the checkin — whichever the
+  outcome, a completed attempt is exactly what a claim exists to guard
+  against overlapping with a second one. Not identity-guarded against a
+  stale, very-delayed checkin clearing a newer claim (a narrow race even
+  in the scenario this exists for) — see their doc comments for why
+  that's an accepted tradeoff, not an oversight: the real correctness
+  guarantee is the second mechanism below, this is a responsiveness
+  optimization on top of it.
+- **Self-expiry via `claim_expires_at`** (`RenewalLeaseDuration`, default
+  15m — comfortably longer than a real issue/renew cycle, short enough
+  that a genuinely crashed spoke doesn't block retries for long) is what
+  actually guarantees a claim can't block forever, including the case a
+  spoke crashes mid-attempt and never checks in at all.
+
+**`internal/spokeagent`'s local retry-backoff check moved earlier as a
+direct consequence of this design**, ahead of ever calling the hub's
+`/due` at all, not after — previously, backoff was checked only after the
+hub had already answered "due." With claiming folded into that same
+answer, checking backoff second would mean a claim the hub just granted
+could sit unreleased (nothing to release it — the attempt was skipped,
+never reaching a checkin) until it self-expired, potentially blocking
+this same spoke's own next poll tick from claiming it for no reason.
+Checking backoff first means the hub is never asked, and therefore
+nothing is ever claimed, for an attempt that was never going to happen
+anyway — a stronger, simpler guarantee than before, not just a
+side-effect fix.
+
+`claimed_by`/`claimed_at`/`claim_expires_at` are schema version 3 (see
+"Renewal health tracking" above for the migration mechanism this
+project has used since version 2 — the same pattern applies here without
+changes).
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary including
@@ -642,14 +697,21 @@ arrives for a cert the watchdog had flagged) fires a symmetric
   the staleness watchdog including that it doesn't refire every pass for
   a still-stale cert, that recovery fires a symmetric notification, and
   that a never-checked-in cert gets the same grace period a real checkin
-  history would — all via real HTTP requests against a real temp-file
-  SQLite store, with a fake `challenge.Provider` standing in for a real
-  DNS API),
+  history would, and the renewal lease including that a second `/due`
+  call while a claim is held reports not-due and that a released claim
+  (via checkin) is immediately claimable again — all via real HTTP
+  requests against a real temp-file SQLite store, with a fake
+  `challenge.Provider` standing in for a real DNS API, and (for the
+  claim specifically) against real Pebble/`pebble-challtestsrv`
+  end-to-end — see "End-to-end testing with Pebble" above — proving it
+  prevents an actual duplicate real issuance, not just that the
+  underlying SQL is atomic in isolation),
   **`internal/hubstore`** (the `CheckinActive`/`CheckinFailed` split that
   keeps a failed renewal from erasing a still-valid certificate's known
   expiry, the failure-streak/last-success tracking, `All`'s fleet-wide
-  enumeration, and the `schema_meta` migration path against a hand-built
-  pre-migration database),
+  enumeration, `Claim`'s atomicity under real concurrent goroutines (not
+  just assumed from the SQL), and the `schema_meta` migration path
+  against hand-built pre-migration databases at each version),
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
   backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
   (including a round-trip through the real config loader), **`internal/hubclient`**

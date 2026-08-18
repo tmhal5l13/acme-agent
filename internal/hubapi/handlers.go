@@ -200,6 +200,21 @@ type dueResponse struct {
 // question — the hub is the scheduling authority, deciding based on the
 // certificate's last-reported expiry against this cert's renewal policy
 // (SpokeCertConfig.RenewBefore, or the hub-wide default).
+//
+// Answering "due" also atomically claims a renewal lease
+// (hubstore.Store.Claim) — the mechanism that stops two overlapping
+// attempts for the same certificate from both proceeding at once (e.g.
+// two processes of what's supposed to be one spoke running concurrently
+// after a botched restart). If a claim is already held and unexpired,
+// this reports "not due" even though it otherwise would be, so a second
+// caller doesn't also start a real ACME order; the wire response shape
+// (dueResponse{Due bool}) doesn't change at all to express this — from a
+// caller's perspective, "due" already meant "yes, go ahead," and that
+// remains exactly true, whether the reason is genuinely not due yet or
+// someone else already has it claimed. The claim is released when a
+// checkin eventually arrives (CheckinActive/CheckinFailed both do this
+// unconditionally) or, failing that, once it self-expires after
+// RenewalLeaseDuration.
 func (s *Server) handleDue(w http.ResponseWriter, r *http.Request) {
 	spokeID, cert, err := s.authorize(r)
 	if err != nil {
@@ -224,6 +239,16 @@ func (s *Server) handleDue(w http.ResponseWriter, r *http.Request) {
 		slog.Error("due check", "spoke", spokeID, "name", cert.Name, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	if due {
+		claimed, err := s.store.Claim(spokeID, cert.Name, s.cfg.RenewalLeaseDuration.Duration())
+		if err != nil {
+			slog.Error("claim renewal lease", "spoke", spokeID, "name", cert.Name, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		due = claimed
 	}
 
 	writeJSON(w, http.StatusOK, dueResponse{Due: due})

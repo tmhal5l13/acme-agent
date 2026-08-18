@@ -88,6 +88,16 @@ type HubConfig struct {
 	// 15-minute poll_interval, so normal poll jitter or one slow pass
 	// never trips it.
 	WatchdogStaleAfter Duration `yaml:"watchdog_stale_after"`
+
+	// RenewalLeaseDuration bounds how long handleDue's renewal-lease claim
+	// (hubstore.Store.Claim) lasts before it self-expires, letting a new
+	// attempt proceed even if the one that acquired it never checks in at
+	// all (crashed mid-attempt, say) — see "Renewal lease/claim" in
+	// ARCHITECTURE.md. Default (15m) is comfortably longer than a real
+	// issue/renew cycle (ACME order, DNS-01 propagation, install) but
+	// short enough that a genuinely crashed spoke doesn't block retries
+	// for long.
+	RenewalLeaseDuration Duration `yaml:"renewal_lease_duration"`
 }
 
 // ACMEDefaultsConfig holds renewal policy defaults, overridable per cert via
@@ -136,11 +146,12 @@ type SpokeCertConfig struct {
 }
 
 const (
-	defaultHubRenewBefore     = 30 * 24 * time.Hour
-	defaultNotifyTimeout      = 30 * time.Second
-	defaultRenewalJitter      = 48 * time.Hour
-	defaultDNSProviderTimeout = 3 * time.Minute
-	defaultWatchdogStaleAfter = 2 * time.Hour
+	defaultHubRenewBefore       = 30 * 24 * time.Hour
+	defaultNotifyTimeout        = 30 * time.Second
+	defaultRenewalJitter        = 48 * time.Hour
+	defaultDNSProviderTimeout   = 3 * time.Minute
+	defaultWatchdogStaleAfter   = 2 * time.Hour
+	defaultRenewalLeaseDuration = 15 * time.Minute
 )
 
 // LoadHubConfig reads, expands, parses, and validates the hub's config file.
@@ -177,6 +188,9 @@ func (c *HubConfig) applyDefaults() {
 	}
 	if c.WatchdogStaleAfter == 0 {
 		c.WatchdogStaleAfter = Duration(defaultWatchdogStaleAfter)
+	}
+	if c.RenewalLeaseDuration == 0 {
+		c.RenewalLeaseDuration = Duration(defaultRenewalLeaseDuration)
 	}
 	if c.TLSCertFile == "" {
 		c.TLSCertFile = filepath.Join(c.DataDir, "tls", "cert.pem")

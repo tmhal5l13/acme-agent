@@ -19,13 +19,24 @@ type CertState struct {
 	LastError           sql.NullString
 	ConsecutiveFailures int
 	LastSuccessAt       sql.NullTime
+	ClaimedBy           sql.NullString
+	ClaimedAt           sql.NullTime
+	ClaimExpiresAt      sql.NullTime
 }
 
 // CheckinActive records a spoke's report of a successful issuance or
 // renewal: the certificate fields (not_before/not_after/serial_number) are
 // updated to describe the certificate the spoke actually just installed,
 // status becomes "active", the failure streak resets to zero, and
-// last_success_at is set to now.
+// last_success_at is set to now. Also releases any renewal-lease claim
+// (see Claim) unconditionally, since a completed attempt — successful or
+// not, see CheckinFailed too — is exactly what a claim exists to guard.
+// Not identity-guarded against a stale, very-delayed checkin clearing a
+// newer claim (a narrow race even in the scenario this exists for: an
+// abandoned attempt's checkin arriving late enough to race a retry that
+// already reclaimed the lease) — self-expiry via claim_expires_at is the
+// actual correctness guarantee; this is a responsiveness optimization on
+// top of it, not load-bearing on its own.
 func (s *Store) CheckinActive(spokeID, name string, notBefore, notAfter time.Time, serialNumber string) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`
@@ -39,7 +50,10 @@ func (s *Store) CheckinActive(spokeID, name string, notBefore, notAfter time.Tim
 			last_checkin_at      = excluded.last_checkin_at,
 			last_error           = NULL,
 			consecutive_failures = 0,
-			last_success_at      = excluded.last_success_at`,
+			last_success_at      = excluded.last_success_at,
+			claimed_by           = NULL,
+			claimed_at           = NULL,
+			claim_expires_at     = NULL`,
 		spokeID, name, notBefore, notAfter, serialNumber, now, now)
 	if err != nil {
 		return fmt.Errorf("checkin (active) for spoke=%q name=%q: %w", spokeID, name, err)
@@ -61,6 +75,10 @@ func (s *Store) CheckinActive(spokeID, name string, notBefore, notAfter time.Tim
 // this split fixed) would make the hub believe a certificate had no known
 // expiry the moment a single renewal attempt failed, even though the
 // installed certificate might still be weeks from expiring.
+//
+// Also releases any renewal-lease claim unconditionally, same as
+// CheckinActive — see that method's doc comment for why this isn't
+// identity-guarded and doesn't need to be.
 func (s *Store) CheckinFailed(spokeID, name string, checkinErr error, consecutiveFailures int) error {
 	var errText sql.NullString
 	if checkinErr != nil {
@@ -75,7 +93,10 @@ func (s *Store) CheckinFailed(spokeID, name string, checkinErr error, consecutiv
 			status               = 'failed',
 			last_checkin_at      = excluded.last_checkin_at,
 			last_error           = excluded.last_error,
-			consecutive_failures = excluded.consecutive_failures`,
+			consecutive_failures = excluded.consecutive_failures,
+			claimed_by           = NULL,
+			claimed_at           = NULL,
+			claim_expires_at     = NULL`,
 		spokeID, name, now, errText, consecutiveFailures)
 	if err != nil {
 		return fmt.Errorf("checkin (failed) for spoke=%q name=%q: %w", spokeID, name, err)
@@ -88,13 +109,14 @@ func (s *Store) CheckinFailed(spokeID, name string, checkinErr error, consecutiv
 // treat as "due" (nothing has ever been issued).
 func (s *Store) Get(spokeID, name string) (*CertState, error) {
 	row := s.db.QueryRow(`
-		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at
+		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at, claimed_by, claimed_at, claim_expires_at
 		FROM spoke_cert_state WHERE spoke_id = ? AND name = ?`, spokeID, name)
 
 	var cs CertState
 	err := row.Scan(
 		&cs.SpokeID, &cs.Name, &cs.NotBefore, &cs.NotAfter, &cs.SerialNumber, &cs.Status,
 		&cs.LastCheckinAt, &cs.LastError, &cs.ConsecutiveFailures, &cs.LastSuccessAt,
+		&cs.ClaimedBy, &cs.ClaimedAt, &cs.ClaimExpiresAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -113,7 +135,7 @@ func (s *Store) Get(spokeID, name string) (*CertState, error) {
 // cross-reference this against the hub's config.
 func (s *Store) All() ([]CertState, error) {
 	rows, err := s.db.Query(`
-		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at
+		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at, claimed_by, claimed_at, claim_expires_at
 		FROM spoke_cert_state`)
 	if err != nil {
 		return nil, fmt.Errorf("query all cert states: %w", err)
@@ -126,6 +148,7 @@ func (s *Store) All() ([]CertState, error) {
 		if err := rows.Scan(
 			&cs.SpokeID, &cs.Name, &cs.NotBefore, &cs.NotAfter, &cs.SerialNumber, &cs.Status,
 			&cs.LastCheckinAt, &cs.LastError, &cs.ConsecutiveFailures, &cs.LastSuccessAt,
+			&cs.ClaimedBy, &cs.ClaimedAt, &cs.ClaimExpiresAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan cert state row: %w", err)
 		}
@@ -135,4 +158,50 @@ func (s *Store) All() ([]CertState, error) {
 		return nil, fmt.Errorf("iterate cert state rows: %w", err)
 	}
 	return states, nil
+}
+
+// Claim atomically marks (spokeID, name) as claimed by spokeID for
+// leaseDuration, returning whether the claim was actually acquired. It
+// succeeds either when no row exists yet (a certificate that's never
+// checked in - claiming it doesn't require having observed it first) or
+// when the existing row's claim_expires_at is unset or already in the
+// past; it fails (returns false, nil error) if another claim is already
+// active and unexpired.
+//
+// This is the mechanism that stops two overlapping attempts for the same
+// certificate from both proceeding with a real ACME order at once - e.g.
+// two processes of what's supposed to be one spoke running concurrently
+// after a botched restart, or a slow first attempt still in flight when
+// its own next poll tick would otherwise start a second one. A claim
+// that's never released (the holder crashed, or simply never checked in)
+// self-expires after leaseDuration rather than blocking retries forever -
+// see CheckinActive/CheckinFailed, which both release it unconditionally
+// as part of recording any completed attempt.
+//
+// The WHERE clause on the UPSERT's DO UPDATE is what makes this atomic:
+// SQLite serializes writes to begin with, but the conditional guard means
+// a losing caller's UPDATE is skipped entirely (RowsAffected reports 0)
+// rather than racing to overwrite a winner's claim after the fact.
+func (s *Store) Claim(spokeID, name string, leaseDuration time.Duration) (bool, error) {
+	now := time.Now().UTC()
+	expiresAt := now.Add(leaseDuration)
+
+	result, err := s.db.Exec(`
+		INSERT INTO spoke_cert_state (spoke_id, name, status, claimed_by, claimed_at, claim_expires_at)
+		VALUES (?, ?, 'unknown', ?, ?, ?)
+		ON CONFLICT (spoke_id, name) DO UPDATE SET
+			claimed_by       = excluded.claimed_by,
+			claimed_at       = excluded.claimed_at,
+			claim_expires_at = excluded.claim_expires_at
+		WHERE spoke_cert_state.claim_expires_at IS NULL OR spoke_cert_state.claim_expires_at < ?`,
+		spokeID, name, spokeID, now, expiresAt, now)
+	if err != nil {
+		return false, fmt.Errorf("claim for spoke=%q name=%q: %w", spokeID, name, err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim rows affected for spoke=%q name=%q: %w", spokeID, name, err)
+	}
+	return affected > 0, nil
 }

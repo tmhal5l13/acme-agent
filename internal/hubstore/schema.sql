@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     id      INTEGER PRIMARY KEY CHECK (id = 1),
     version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 2);
+INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 3);
 
 -- Observed state only, reported by spokes via checkin. Desired state (which
 -- domains, which DNS provider, renewal policy) lives in the hub's
@@ -30,5 +30,17 @@ CREATE TABLE IF NOT EXISTS spoke_cert_state (
     last_error            TEXT,
     consecutive_failures  INTEGER NOT NULL DEFAULT 0,
     last_success_at       TIMESTAMP,
+    -- claimed_by/claimed_at/claim_expires_at (schema version 3) implement
+    -- a renewal lease: Store.Claim atomically sets these, succeeding only
+    -- if no other unexpired claim already exists, so two overlapping
+    -- attempts for the same certificate (e.g. two processes of what's
+    -- supposed to be one spoke running concurrently after a botched
+    -- restart) can't both proceed with a real ACME order at once. A claim
+    -- that's never released (the holder crashed mid-attempt) self-expires
+    -- via claim_expires_at rather than blocking retries forever - see
+    -- Store.Claim/ReleaseClaim.
+    claimed_by            TEXT,
+    claimed_at            TIMESTAMP,
+    claim_expires_at      TIMESTAMP,
     PRIMARY KEY (spoke_id, name)
 );

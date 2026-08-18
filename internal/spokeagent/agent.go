@@ -69,17 +69,19 @@ func (a *Agent) RunOnce(ctx context.Context) {
 }
 
 func (a *Agent) processIfDue(ctx context.Context, cert config.SpokeLocalCertConfig) error {
-	due, err := a.checkDue(ctx, cert.Name)
-	if err != nil {
-		return fmt.Errorf("check due with hub: %w", err)
-	}
-	if !due {
-		return nil
-	}
-
-	// The hub decides *whether* a cert is due (based on expiry); backoff
-	// after a *failed* attempt is a local decision — the hub has no notion
-	// of retry state, only of what was last successfully reported.
+	// Backoff after a *failed* attempt is a purely local decision — the
+	// hub has no notion of retry state, only of what was last
+	// successfully reported — so it's checked before ever calling the
+	// hub, not after. This matters beyond just avoiding an unnecessary
+	// network call: the hub's /due now also atomically claims a renewal
+	// lease when it answers "due" (see internal/hubapi's handleDue and
+	// hubstore.Store.Claim), released only when a checkin eventually
+	// arrives. If due were checked first and backoff skipped the actual
+	// attempt afterward, that claim would sit unreleased until it
+	// self-expired — potentially blocking this same spoke's own next
+	// poll tick from claiming it, for no reason. Checking backoff first
+	// means the hub is never asked, and therefore nothing is ever
+	// claimed, for an attempt that was never going to happen anyway.
 	cs, err := a.st.GetOrCreateCertState(cert.Name)
 	if err != nil {
 		return fmt.Errorf("load local state: %w", err)
@@ -92,6 +94,14 @@ func (a *Agent) processIfDue(ctx context.Context, cert config.SpokeLocalCertConf
 				"name", cert.Name, "consecutive_failures", cs.ConsecutiveFailures, "backoff", backoff)
 			return nil
 		}
+	}
+
+	due, err := a.checkDue(ctx, cert.Name)
+	if err != nil {
+		return fmt.Errorf("check due with hub: %w", err)
+	}
+	if !due {
+		return nil
 	}
 
 	return a.ProcessCert(ctx, cert)
