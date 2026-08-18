@@ -386,10 +386,16 @@ atomic replace, the same guarantee the per-file writes already relied on,
 just applied to the bundle as a whole instead of to each file
 individually. Nothing ever observes a partially-swapped bundle.
 
-Old versions under `versions/` are not cleaned up automatically and
-accumulate across renewals — at roughly one renewal every 60-90 days this
-isn't a practical problem on any realistic timeline, but an operator
-wanting to reclaim the space would need to prune it themselves.
+`certwriter.Write` itself never deletes old versions — `internal/spokeagent`'s
+`ProcessCert` calls `certwriter.Prune` separately, right after a successful
+`Write`, keeping the 3 most recent versions plus whichever one `current`
+points at (even if that one happens to fall outside the 3 most recent —
+`current` describes what's actually installed right now and is never
+removed out from under it, regardless of how it got there). A `Prune`
+failure is logged, not treated as an issuance failure: the new certificate
+is already fully installed and usable either way. Not configurable — 3 is
+a fixed default, since at roughly one renewal every 60-90 days the exact
+number barely matters in practice.
 
 ## Renewal health tracking
 
@@ -499,18 +505,23 @@ in isolation.
   nominally on), **`internal/selfsigned`** (SAN correctness for both IP
   and DNS hosts, key file permissions, idempotency across restarts),
   **`internal/certwriter`** (bundle-swap atomicity via the `current`
-  symlink, permissions, and that a renewal fully replaces what `current`
-  resolves to without touching the prior version's own files), `config`
-  (loading/validation, including the mutual-exclusivity and pairing rules
-  around ACME CA flexibility — see above), `internal/acmeclient` (directory
-  URL resolution for `environment` vs `directory_url`, private-CA trust,
-  and — gated behind `ACME_AGENT_E2E_TESTS`, see "End-to-end testing with
-  Pebble" below — the actual `GetOrRegisterAccount`/`Issue` ACME protocol
-  calls against a real local ACME server, including the full spoke↔hub↔CA
-  relay path), `internal/hook`, and `internal/dnsprovider`. Everything else —
-  `internal/store` and all three `cmd/` binaries — has been verified only
-  by running real binaries against real infrastructure (a real Route53
-  zone, Let's Encrypt staging) during development, not by `go test`.
+  symlink, permissions, that a renewal fully replaces what `current`
+  resolves to without touching the prior version's own files, and that
+  `Prune` never deletes whatever `current` points at regardless of its
+  age), `config` (loading/validation, including the mutual-exclusivity and
+  pairing rules around ACME CA flexibility — see above), `internal/acmeclient`
+  (directory URL resolution for `environment` vs `directory_url`,
+  private-CA trust, and — gated behind `ACME_AGENT_E2E_TESTS`, see
+  "End-to-end testing with Pebble" below — the actual
+  `GetOrRegisterAccount`/`Issue` ACME protocol calls against a real local
+  ACME server, including the full spoke↔hub↔CA relay path), `internal/hook`,
+  and `internal/dnsprovider`. `internal/store` has some coverage now too
+  (WAL/busy_timeout takes effect, `GetAccount`'s not-found path) but far
+  less than `internal/hubstore`'s. Everything else — the remaining
+  `internal/store` surface and all three `cmd/` binaries — has been
+  verified only by running real binaries against real infrastructure (a
+  real Route53 zone, Let's Encrypt staging) during development, not by
+  `go test`.
 - **No hot-reload.** Both `acme-onboard` output and a hand-edit alike
   require restarting the hub to take effect — config is loaded once at
   startup.
@@ -518,7 +529,11 @@ in isolation.
   points exist by design, both worth naming explicitly rather than
   leaving implicit: `internal/hubstore`'s SQLite backend serializes
   writes (every checkin is one, regardless of how many spokes are
-  checking in concurrently), and every spoke's DNS-01 challenge relays
+  checking in concurrently) — `hubstore.Open`/`store.Open` set WAL journal
+  mode and a 5s `busy_timeout` specifically so a write waits for a
+  concurrent one to finish rather than failing immediately with
+  `SQLITE_BUSY`, but there's still one real bottleneck underneath: only
+  one writer at a time — and every spoke's DNS-01 challenge relays
   through the hub to the actual DNS provider, whose own API rate limits
   this project has no control over. `ACMEDefaultsConfig.RenewalJitter`
   spreads *when* certificates come due specifically to avoid all of them

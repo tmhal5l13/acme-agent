@@ -153,6 +153,13 @@ func (a *Agent) ProcessCert(ctx context.Context, cert config.SpokeLocalCertConfi
 	if err := certwriter.Write(certDir, certResource.PrivateKey, certResource.Certificate, certResource.IssuerCertificate); err != nil {
 		return a.fail(ctx, cert, fmt.Errorf("write certificate: %w", err))
 	}
+	// Best-effort housekeeping, not a correctness concern: the new
+	// certificate is already fully installed and usable regardless of
+	// whether old versions get cleaned up, so a Prune failure is logged,
+	// not treated as an issuance failure.
+	if err := certwriter.Prune(certDir); err != nil {
+		slog.Error("prune old certificate versions", "name", cert.Name, "error", err)
+	}
 
 	notBefore, notAfter, serial, err := parseCertTimes(certResource.Certificate)
 	if err != nil {
