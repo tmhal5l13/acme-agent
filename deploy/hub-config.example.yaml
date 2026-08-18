@@ -41,6 +41,15 @@ notify_timeout: 30s
 # to 3m, matching the spoke's own dns01_timeout default.
 # dns_provider_timeout: 3m
 
+# Optional. Set to enable GET /v1/status, a read-only, fleet-wide view of
+# every certificate's renewal health (status, failure streak, last
+# success, expiry) - see ARCHITECTURE.md "Status/dashboard API". A
+# separate credential from any spoke's own token, deliberately: a spoke's
+# token only ever authorizes it for its own certificates, which would
+# defeat the point of a fleet-wide view. Left unset, the endpoint doesn't
+# exist at all.
+# status_token: "${STATUS_TOKEN}"
+
 dns_providers:
   route53_main:
     type: route53

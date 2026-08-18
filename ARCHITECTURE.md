@@ -551,23 +551,51 @@ in isolation.
   lookup doesn't have the byte-by-byte timing-leak shape that pattern
   exists to fix).
 
+## Status/dashboard API
+
+`GET /v1/status` answers a read-only, fleet-wide view of every configured
+certificate's renewal health — status, failure streak, last success,
+expiry — the same data previously only reachable by querying `hubstore`'s
+SQLite file directly. Gated by `status_token`, a credential deliberately
+separate from any spoke's own bearer token: a spoke's token only ever
+authorizes it for its own certificates (`internal/hubapi.authorize`),
+which would defeat the point of a *fleet-wide* view. Unlike per-spoke
+tokens (a plain map lookup — see "Hub network hardening" above), the
+status token comparison genuinely is `crypto/subtle.ConstantTimeCompare`,
+since here there's exactly one valid value being compared directly, not a
+set being looked up — the byte-by-byte timing-leak shape that primitive
+exists to fix.
+
+Left unset, `status_token` disables the endpoint entirely — `Handler()`
+doesn't register the route at all, rather than registering it and always
+rejecting, so it's a 404, not a 401, when unconfigured.
+
+The response merges two sources, not just `hubstore.Store.All()` alone: a
+certificate that's configured (`cfg.Spokes[*].Certs`) but has never once
+checked in still appears, as `status: "unknown"` (`spoke_cert_state`'s own
+default), rather than silently missing from the response just because no
+row exists for it yet.
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary including
   that a near-miss bearer token is rejected exactly like an unrelated one,
   per-cert domain authorization including case/trailing-dot normalization,
-  checkin including input validation and oversized-body rejection, due
-  including per-cert policy override, dns01 relay including that a
-  provider call that never returns is bounded by `DNSProviderTimeout`
-  rather than hanging the handler forever, notify_hook transition
-  detection including that a failed checkin's notification carries the
-  certificate's real preserved expiry, not a zero value — all via real
-  HTTP requests against a real temp-file SQLite store, with a fake
-  `challenge.Provider` standing in for a real DNS API), **`internal/hubstore`**
-  (the `CheckinActive`/`CheckinFailed` split that keeps a failed renewal
-  from erasing a still-valid certificate's known expiry, the
-  failure-streak/last-success tracking, and the `schema_meta` migration
-  path against a hand-built pre-migration database),
+  checkin including input validation, oversized-body rejection, and
+  implausible-lifetime rejection, due including per-cert policy override,
+  dns01 relay including that a provider call that never returns is bounded
+  by `DNSProviderTimeout` rather than hanging the handler forever,
+  notify_hook transition detection including that a failed checkin's
+  notification carries the certificate's real preserved expiry, not a
+  zero value, and the status API including that a spoke's own token
+  doesn't also work there and that a never-checked-in cert still appears
+  — all via real HTTP requests against a real temp-file SQLite store, with
+  a fake `challenge.Provider` standing in for a real DNS API),
+  **`internal/hubstore`** (the `CheckinActive`/`CheckinFailed` split that
+  keeps a failed renewal from erasing a still-valid certificate's known
+  expiry, the failure-streak/last-success tracking, `All`'s fleet-wide
+  enumeration, and the `schema_meta` migration path against a hand-built
+  pre-migration database),
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
   backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
   (including a round-trip through the real config loader), **`internal/hubclient`**
