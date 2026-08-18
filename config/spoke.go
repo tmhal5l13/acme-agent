@@ -121,8 +121,8 @@ func (c *SpokeConfig) validate() error {
 
 	seen := make(map[string]bool, len(c.Certs))
 	for _, cert := range c.Certs {
-		if cert.Name == "" {
-			return fmt.Errorf("certs: entry missing name")
+		if err := validateCertName(cert.Name); err != nil {
+			return fmt.Errorf("certs: %w", err)
 		}
 		if seen[cert.Name] {
 			return fmt.Errorf("certs: duplicate name %q", cert.Name)
@@ -131,6 +131,11 @@ func (c *SpokeConfig) validate() error {
 
 		if len(cert.Domains) == 0 {
 			return fmt.Errorf("certs[%s]: at least one domain is required", cert.Name)
+		}
+		for _, d := range cert.Domains {
+			if err := validateDomain(d); err != nil {
+				return fmt.Errorf("certs[%s]: %w", cert.Name, err)
+			}
 		}
 	}
 
