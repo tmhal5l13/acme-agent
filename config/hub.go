@@ -126,15 +126,21 @@ type ACMEDefaultsConfig struct {
 	RenewalJitter Duration `yaml:"renewal_jitter"`
 }
 
-// SpokeEntry is one spoke's identity (its bearer token) and the certificates
-// it's authorized to request/renew. The token is what a spoke presents on
-// every API call; the hub looks up which spoke (and therefore which certs
-// and domains) a request is authorized to act on purely from this map — a
-// spoke can never request a DNS-01 change for a domain outside its own
-// Certs list.
+// SpokeEntry is one spoke's identity (its bearer tokens) and the
+// certificates it's authorized to request/renew. Any token in Tokens is
+// what a spoke presents on every API call; the hub looks up which spoke
+// (and therefore which certs and domains) a request is authorized to act
+// on purely from this map — a spoke can never request a DNS-01 change for
+// a domain outside its own Certs list.
+//
+// Tokens is a list, not a single value, specifically to support rotation:
+// during a rotation grace period, both the old and new token are valid
+// simultaneously (see internal/onboard's PlanRotation), so a spoke can be
+// switched over to the new one without a coordinated instant cutover.
+// Under normal operation it holds exactly one.
 type SpokeEntry struct {
-	Token string            `yaml:"token"`
-	Certs []SpokeCertConfig `yaml:"certs"`
+	Tokens []string          `yaml:"tokens"`
+	Certs  []SpokeCertConfig `yaml:"certs"`
 }
 
 // SpokeCertConfig is one certificate a spoke is authorized to manage.
@@ -214,13 +220,18 @@ func (c *HubConfig) validate() error {
 
 	seenTokens := make(map[string]string, len(c.Spokes)) // token -> spoke id, to catch accidental reuse
 	for spokeID, spoke := range c.Spokes {
-		if spoke.Token == "" {
-			return fmt.Errorf("spokes[%s]: token is required", spokeID)
+		if len(spoke.Tokens) == 0 {
+			return fmt.Errorf("spokes[%s]: at least one entry under tokens is required", spokeID)
 		}
-		if other, ok := seenTokens[spoke.Token]; ok {
-			return fmt.Errorf("spokes[%s]: token is also used by spokes[%s] — tokens must be unique, they're how a request is identified", spokeID, other)
+		for _, token := range spoke.Tokens {
+			if token == "" {
+				return fmt.Errorf("spokes[%s]: tokens entries must not be empty", spokeID)
+			}
+			if other, ok := seenTokens[token]; ok {
+				return fmt.Errorf("spokes[%s]: token is also used by spokes[%s] — tokens must be unique, they're how a request is identified", spokeID, other)
+			}
+			seenTokens[token] = spokeID
 		}
-		seenTokens[spoke.Token] = spokeID
 
 		if len(spoke.Certs) == 0 {
 			return fmt.Errorf("spokes[%s]: at least one entry under certs is required", spokeID)

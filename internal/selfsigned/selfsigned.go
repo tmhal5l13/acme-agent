@@ -38,7 +38,20 @@ func EnsureCert(certPath, keyPath, host string) error {
 	if certErr == nil && keyErr == nil {
 		return nil
 	}
+	return GenerateCert(certPath, keyPath, host)
+}
 
+// GenerateCert unconditionally (over)writes a fresh self-signed certificate
+// and key at certPath/keyPath, regardless of what's already there — unlike
+// EnsureCert, which only fills in a missing pair, this always produces a
+// new one. It exists for hub TLS certificate rotation (see
+// ARCHITECTURE.md "Hub TLS certificate rotation"): generating a "next"
+// candidate certificate into a new path, so it can be distributed to
+// spokes' trust files ahead of switching the hub over to actually serving
+// it — since crypto/x509.CertPool accepts multiple concatenated PEM certs,
+// a spoke can trust both the current and next certificate at once during
+// that window.
+func GenerateCert(certPath, keyPath, host string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate key: %w", err)

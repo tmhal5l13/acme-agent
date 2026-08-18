@@ -681,6 +681,80 @@ side-effect fix.
 project has used since version 2 — the same pattern applies here without
 changes).
 
+## Spoke token rotation
+
+Each spoke's `tokens` in the hub's config is a list, not a single value,
+specifically so a bearer token can be rotated without a coordinated instant
+cutover: both an old and a new token are valid for a spoke simultaneously
+during a grace period (`internal/hubapi`'s `authorize` does one map lookup
+regardless of how many tokens map to a spoke — no code cared how many
+entries the list holds). Under normal operation it holds exactly one.
+
+The workflow, using `cmd/acme-onboard`'s `PlanRotation` (`internal/onboard`):
+
+1. Run the rotation plan for the spoke. It generates a fresh, cryptographically
+   random token and prints a snippet to add *alongside* the spoke's existing
+   token(s) under `spokes.<id>.tokens` in the hub's config, plus the matching
+   env var to add to the hub's env file. It deliberately never reprints or
+   reconstructs the spoke's *existing* token — by the time the hub's config is
+   loaded, `${VAR}` references have already been expanded to literal secret
+   values (see `config.expandEnv`), so there's no way to recover what env var
+   name an existing token was originally written under, and printing the
+   literal secret into an add-only snippet meant for pasting/logging would be
+   a real way to leak it.
+2. Add that line and env var, restart the hub — both tokens are now valid.
+3. Update the spoke's own `hub_token` to the new value, restart the spoke,
+   confirm it's actually working (a successful `/due` poll is enough).
+4. Remove the old token line from the hub's config and its env file, restart
+   the hub again to complete the rotation — only the new token authenticates
+   from this point on.
+
+The new token's env var name can't just be `envVarName(spokeID)` (what a
+fresh onboard would generate) — that would collide with the existing token's
+own env var name while both need to coexist as distinct `${VAR}` references
+during the grace period. `PlanRotation` appends a short random hex suffix to
+keep the two apart.
+
+## Hub TLS certificate rotation
+
+Rotating the hub's self-signed certificate (see "TLS" above) needs **no code
+change** to `internal/hubclient`, because `crypto/x509.CertPool.AppendCertsFromPEM`
+— what `hubclient.New` already calls to build its trust pool — accepts a PEM
+blob containing more than one certificate concatenated together, and a
+`CertPool` can be built from that in one call. A spoke's `hub_tls_cert_file`
+can therefore hold both the hub's current certificate and a "next" one at
+once, and it'll trust a TLS handshake presenting either (`internal/hubclient`'s
+`TestNew_TrustsMultipleConcatenatedCerts` proves this directly against two
+real listeners, not just that `AppendCertsFromPEM`'s docs claim it).
+
+The one new primitive this needed: `internal/selfsigned.GenerateCert`, an
+*unconditional* certificate generator — unlike `EnsureCert`, which only fills
+in a missing cert/key pair and leaves an existing one untouched (the property
+that keeps a normal hub restart from invalidating every spoke's pinned copy),
+`GenerateCert` always produces a fresh one, which is exactly what's needed to
+generate a "next" candidate cert into a new path without touching the one
+currently in service.
+
+The manual rotation procedure:
+
+1. Generate a "next" cert/key pair into new paths (e.g.
+   `internal/selfsigned.GenerateCert("/var/lib/acme-hub/tls/cert-next.pem",
+   ".../key-next.pem", host)` — there's no CLI flag for this yet, it's a
+   one-off script/manual step).
+2. Concatenate the current and next certificates into each spoke's
+   `hub_tls_cert_file` (`cat cert.pem cert-next.pem > combined-cert.pem` on
+   the hub, then copy `combined-cert.pem` out to every spoke, replacing what
+   they had). Restart each spoke so it picks up the combined trust file — no
+   hub restart needed yet, it's still serving the old cert throughout this
+   step.
+3. Once every spoke has confirmed it's working against the hub while trusting
+   both certs, replace `tls_cert_file`/`tls_key_file`'s contents with the
+   "next" pair and restart the hub — it now presents the new certificate,
+   which every spoke already trusts, so this cutover doesn't require another
+   round of spoke restarts.
+4. Once confirmed, spokes' trust files can be trimmed back down to just the
+   new certificate alone (optional cleanup, not required for correctness).
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary including
@@ -697,9 +771,11 @@ changes).
   the staleness watchdog including that it doesn't refire every pass for
   a still-stale cert, that recovery fires a symmetric notification, and
   that a never-checked-in cert gets the same grace period a real checkin
-  history would, and the renewal lease including that a second `/due`
+  history would, the renewal lease including that a second `/due`
   call while a claim is held reports not-due and that a released claim
-  (via checkin) is immediately claimable again — all via real HTTP
+  (via checkin) is immediately claimable again, and token rotation
+  including that a spoke with two tokens configured authenticates with
+  either one, not just the first — all via real HTTP
   requests against a real temp-file SQLite store, with a fake
   `challenge.Provider` standing in for a real DNS API, and (for the
   claim specifically) against real Pebble/`pebble-challtestsrv`
@@ -714,13 +790,20 @@ changes).
   against hand-built pre-migration databases at each version),
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
   backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
-  (including a round-trip through the real config loader), **`internal/hubclient`**
+  (including a round-trip through the real config loader, and
+  `PlanRotation` — a fresh token distinct from the spoke's existing one,
+  a collision-free env var name, and that its output never leaks the
+  spoke's existing token value), **`internal/hubclient`**
   (real TLS handshakes against a real listener using a real
   `internal/selfsigned` certificate — including that a client pinned to
   the *wrong* certificate is actually rejected, that a server unable to
   negotiate above TLS 1.2 is rejected too, not just that TLS is nominally
-  on), **`internal/selfsigned`** (SAN correctness for both IP
-  and DNS hosts, key file permissions, idempotency across restarts),
+  on, and that a trust file holding two concatenated certificates accepts
+  a handshake presenting either one — the mechanism hub TLS rotation
+  relies on), **`internal/selfsigned`** (SAN correctness for both IP
+  and DNS hosts, key file permissions, `EnsureCert`'s idempotency across
+  restarts, and `GenerateCert`'s unconditional-overwrite behavior — the
+  opposite property, needed for rotation),
   **`internal/certwriter`** (bundle-swap atomicity via the `current`
   symlink, permissions, that a renewal fully replaces what `current`
   resolves to without touching the prior version's own files, and that

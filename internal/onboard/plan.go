@@ -85,7 +85,10 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 				return nil, fmt.Errorf("spoke %q already has a certificate named %q", req.SpokeID, req.CertName)
 			}
 		}
-		token = existing.Token
+		if len(existing.Tokens) == 0 {
+			return nil, fmt.Errorf("spoke %q has no tokens configured on the hub — this shouldn't be possible for an already-valid hub config", req.SpokeID)
+		}
+		token = existing.Tokens[0] // the primary/first token; see PlanRotation for adding a second during rotation
 	} else {
 		t, err := GenerateToken()
 		if err != nil {
@@ -114,7 +117,8 @@ func buildHubConfigYAML(req Request, envVar string, isNewSpoke bool) string {
 	var b strings.Builder
 	if isNewSpoke {
 		fmt.Fprintf(&b, "  %s:\n", req.SpokeID)
-		fmt.Fprintf(&b, "    token: \"${%s}\"\n", envVar)
+		fmt.Fprintf(&b, "    tokens:\n")
+		fmt.Fprintf(&b, "      - \"${%s}\"\n", envVar)
 		fmt.Fprintf(&b, "    certs:\n")
 		writeCertBlock(&b, req, "      ")
 	} else {
@@ -165,4 +169,72 @@ func buildSpokeConfigYAML(req Request, existingCerts []config.SpokeCertConfig) s
 		fmt.Fprintf(&b, "    # reload_hook: \"systemctl reload nginx\"\n")
 	}
 	return b.String()
+}
+
+// RotationRequest identifies the spoke whose bearer token is being
+// rotated.
+type RotationRequest struct {
+	SpokeID string
+}
+
+// RotationResult is what PlanRotation generates: a freshly minted token
+// to add *alongside* the spoke's existing one(s), plus the operator
+// instructions for using it — see PlanRotation's doc comment for the full
+// workflow this is one step of.
+type RotationResult struct {
+	NewToken      string
+	HubEnvVarName string // ${VAR} name for NewToken
+	HubConfigYAML string // instructions + snippet to add under spokes.<id>.tokens
+}
+
+// PlanRotation generates a new token for an already-configured spoke,
+// without touching or even displaying its existing token(s) — see this
+// package's doc comment on the general principle (never let hub/spoke
+// config drift from hand-editing), applied here to rotation specifically.
+//
+// It deliberately does NOT attempt to reprint the spoke's full tokens:
+// list including its current entries: by the time hubCfg is loaded,
+// ${VAR} references have already been expanded to literal secret values
+// (see config.expandEnv) — there's no way to recover what ${VAR} name an
+// existing token was originally written as, and printing the literal
+// secret value itself into a snippet meant for pasting/logging would be
+// a real way to leak it. Instead this only describes what to *add*.
+//
+// The full rotation workflow this is one step of: (1) call PlanRotation,
+// add the printed line to the hub's config.yaml and the matching env var
+// to its env file, restart the hub - both tokens are now valid; (2) update
+// the spoke's own hub_token to the new value, restart the spoke, confirm
+// it's working; (3) remove the old token line from the hub's config.yaml
+// and its env file, restart the hub again to complete the rotation.
+func PlanRotation(hubCfg *config.HubConfig, req RotationRequest) (*RotationResult, error) {
+	if req.SpokeID == "" {
+		return nil, fmt.Errorf("spoke id is required")
+	}
+	if _, ok := hubCfg.Spokes[req.SpokeID]; !ok {
+		return nil, fmt.Errorf("spoke %q is not defined in the hub's config", req.SpokeID)
+	}
+
+	newToken, err := GenerateToken()
+	if err != nil {
+		return nil, err
+	}
+
+	suffix, err := randomHex(4)
+	if err != nil {
+		return nil, fmt.Errorf("generate env var suffix: %w", err)
+	}
+	// A plain envVarName(req.SpokeID) would collide with the existing
+	// token's env var name - these need to coexist as two distinct
+	// ${VAR} references while both are valid during the grace period.
+	envVar := envVarName(req.SpokeID) + "_" + strings.ToUpper(suffix)
+
+	return &RotationResult{
+		NewToken:      newToken,
+		HubEnvVarName: envVar,
+		HubConfigYAML: fmt.Sprintf(
+			"  # Add this new token under spokes.%s.tokens - keep the existing\n"+
+				"  # entry there too until the spoke has confirmed using the new one:\n"+
+				"  #   - \"${%s}\"\n",
+			req.SpokeID, envVar),
+	}, nil
 }

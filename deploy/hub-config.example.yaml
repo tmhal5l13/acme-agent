@@ -98,13 +98,19 @@ dns_providers:
     tsig_secret: "${BIND_TSIG_SECRET}"
     tsig_algorithm: "hmac-sha256." # trailing dot required; matches whatever algorithm the key was generated with (see tsig-keygen)
 
-# Each spoke is one bearer token plus the exact set of certificates (name +
-# domains + which dns_providers entry to use) that token is authorized to
-# act on. A spoke can never request a DNS-01 change, due-check, or checkin
-# for anything outside its own list here.
+# Each spoke is one or more bearer tokens plus the exact set of
+# certificates (name + domains + which dns_providers entry to use) those
+# tokens are authorized to act on. A spoke can never request a DNS-01
+# change, due-check, or checkin for anything outside its own list here.
+#
+# tokens is a list, not a single value, specifically to support rotation:
+# add a second token alongside the first, restart the hub, switch the
+# spoke over to it, then remove the old one - see ARCHITECTURE.md "Spoke
+# token rotation". Under normal operation it holds exactly one.
 spokes:
   freeradius-spoke:
-    token: "${SPOKE_FREERADIUS_TOKEN}"
+    tokens:
+      - "${SPOKE_FREERADIUS_TOKEN}"
     certs:
       - name: radius-cert
         domains: [radius.example.com]
@@ -112,7 +118,8 @@ spokes:
         # renew_before: 720h  # optional; overrides acme_defaults.renew_before for just this cert
 
   nginx-spoke:
-    token: "${SPOKE_NGINX_TOKEN}"
+    tokens:
+      - "${SPOKE_NGINX_TOKEN}"
     certs:
       - name: nginx-cert
         domains: [example.com, "*.example.com"]

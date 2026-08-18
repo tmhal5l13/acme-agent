@@ -17,7 +17,7 @@ func validHubConfig() *HubConfig {
 		},
 		Spokes: map[string]SpokeEntry{
 			"spoke-a": {
-				Token: "token-a",
+				Tokens: []string{"token-a"},
 				Certs: []SpokeCertConfig{
 					{Name: "cert-a", Domains: []string{"example.com"}, DNSProvider: "route53"},
 				},
@@ -59,11 +59,59 @@ func TestHubConfig_NoSpokesIsValid(t *testing.T) {
 func TestHubConfig_RejectsDuplicateTokensAcrossSpokes(t *testing.T) {
 	cfg := validHubConfig()
 	cfg.Spokes["spoke-b"] = SpokeEntry{
-		Token: "token-a", // same as spoke-a's
-		Certs: []SpokeCertConfig{{Name: "cert-b", Domains: []string{"other.example.com"}, DNSProvider: "route53"}},
+		Tokens: []string{"token-a"}, // same as spoke-a's
+		Certs:  []SpokeCertConfig{{Name: "cert-b", Domains: []string{"other.example.com"}, DNSProvider: "route53"}},
 	}
 	if err := cfg.validate(); err == nil {
 		t.Error("expected an error for a token reused across spokes, got nil")
+	}
+}
+
+// TestHubConfig_MultipleTokensPerSpokeIsValid proves a spoke can list more
+// than one token under tokens — the state a rotation grace period leaves it
+// in (see SpokeEntry's doc comment and internal/onboard.PlanRotation): both
+// an old and a new token valid for the same spoke simultaneously.
+func TestHubConfig_MultipleTokensPerSpokeIsValid(t *testing.T) {
+	cfg := validHubConfig()
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Tokens = []string{"token-a", "token-a-new"}
+	cfg.Spokes["spoke-a"] = spoke
+	if err := cfg.validate(); err != nil {
+		t.Errorf("unexpected error for a spoke with two distinct tokens: %v", err)
+	}
+}
+
+// TestHubConfig_RejectsDuplicateTokensWithinSameSpoke guards the same
+// uniqueness check as TestHubConfig_RejectsDuplicateTokensAcrossSpokes, but
+// for the same spoke listing the identical token twice under its own
+// tokens list.
+func TestHubConfig_RejectsDuplicateTokensWithinSameSpoke(t *testing.T) {
+	cfg := validHubConfig()
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Tokens = []string{"token-a", "token-a"}
+	cfg.Spokes["spoke-a"] = spoke
+	if err := cfg.validate(); err == nil {
+		t.Error("expected an error for a token repeated within one spoke's own tokens list, got nil")
+	}
+}
+
+func TestHubConfig_RejectsEmptyTokenEntry(t *testing.T) {
+	cfg := validHubConfig()
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Tokens = []string{"token-a", ""}
+	cfg.Spokes["spoke-a"] = spoke
+	if err := cfg.validate(); err == nil {
+		t.Error("expected an error for an empty entry in tokens, got nil")
+	}
+}
+
+func TestHubConfig_RejectsNoTokens(t *testing.T) {
+	cfg := validHubConfig()
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Tokens = nil
+	cfg.Spokes["spoke-a"] = spoke
+	if err := cfg.validate(); err == nil {
+		t.Error("expected an error for a spoke with no tokens at all, got nil")
 	}
 }
 
