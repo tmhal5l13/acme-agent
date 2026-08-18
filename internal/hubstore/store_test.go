@@ -101,6 +101,92 @@ func TestOpen_MigratesExistingV1Database(t *testing.T) {
 	}
 }
 
+// oldV2Schema is exactly what schema.sql looked like before
+// claimed_by/claimed_at/claim_expires_at were added, kept as a literal
+// here for the same reason oldV1Schema is - so this test doesn't depend
+// on anything outside itself to construct a realistic pre-migration
+// database at this specific version.
+const oldV2Schema = `
+CREATE TABLE schema_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL
+);
+INSERT INTO schema_meta (id, version) VALUES (1, 2);
+
+CREATE TABLE spoke_cert_state (
+    spoke_id              TEXT NOT NULL,
+    name                  TEXT NOT NULL,
+    not_before            TIMESTAMP,
+    not_after             TIMESTAMP,
+    serial_number         TEXT,
+    status                TEXT NOT NULL DEFAULT 'unknown'
+                              CHECK (status IN ('unknown', 'active', 'failed')),
+    last_checkin_at       TIMESTAMP,
+    last_error            TEXT,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    last_success_at       TIMESTAMP,
+    PRIMARY KEY (spoke_id, name)
+);
+`
+
+// TestOpen_MigratesV2ToV3 is TestOpen_MigratesExistingV1Database's
+// counterpart for the claim columns specifically - isolating this step
+// rather than relying on the v1 test to exercise it only incidentally as
+// part of a multi-step catch-up.
+func TestOpen_MigratesV2ToV3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	if _, err := seed.Exec(oldV2Schema); err != nil {
+		t.Fatalf("create v2 schema: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO spoke_cert_state (spoke_id, name, status, serial_number, consecutive_failures) VALUES ('spoke-a', 'cert-a', 'active', 'pre-migration-serial', 2)`,
+	); err != nil {
+		t.Fatalf("seed pre-migration row: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed connection: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v2 database: %v", err)
+	}
+	defer st.Close()
+
+	var version int
+	if err := st.db.QueryRow(`SELECT version FROM schema_meta WHERE id = 1`).Scan(&version); err != nil {
+		t.Fatalf("read schema version after migration: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Errorf("got schema version %d after migration, want %d", version, currentSchemaVersion)
+	}
+
+	cs, err := st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get pre-migration row after migration: %v", err)
+	}
+	if cs.SerialNumber.String != "pre-migration-serial" || cs.ConsecutiveFailures != 2 {
+		t.Errorf("pre-migration data lost: got serial=%q consecutive_failures=%d, want pre-migration-serial/2", cs.SerialNumber.String, cs.ConsecutiveFailures)
+	}
+	if cs.ClaimedBy.Valid || cs.ClaimExpiresAt.Valid {
+		t.Errorf("got a non-null claim on a pre-migration row that was never claimed: claimed_by=%v claim_expires_at=%v", cs.ClaimedBy, cs.ClaimExpiresAt)
+	}
+
+	// And Claim must actually work against this migrated table.
+	claimed, err := st.Claim("spoke-a", "cert-a", time.Minute)
+	if err != nil {
+		t.Fatalf("Claim against a migrated table: %v", err)
+	}
+	if !claimed {
+		t.Error("got claimed=false against a migrated table's never-claimed row, want true")
+	}
+}
+
 // TestOpen_IdempotentOnCurrentDatabase proves migrate is safe to run every
 // process start, including against a database already at the current
 // version - not just once, on first upgrade.

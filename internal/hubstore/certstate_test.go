@@ -3,6 +3,7 @@ package hubstore
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -214,5 +215,87 @@ func TestAll_ReturnsEveryRow(t *testing.T) {
 	}
 	if c.Status != "failed" || c.ConsecutiveFailures != 3 {
 		t.Errorf("spoke-b/cert-c: got status=%q consecutive_failures=%d, want failed/3", c.Status, c.ConsecutiveFailures)
+	}
+}
+
+func TestClaim_SucceedsWhenUnclaimed(t *testing.T) {
+	st := openTestStore(t)
+	claimed, err := st.Claim("spoke-a", "cert-a", time.Minute)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Error("got claimed=false for a never-claimed cert, want true")
+	}
+}
+
+func TestClaim_FailsWhenAlreadyClaimedAndUnexpired(t *testing.T) {
+	st := openTestStore(t)
+	if claimed, err := st.Claim("spoke-a", "cert-a", time.Hour); err != nil || !claimed {
+		t.Fatalf("first Claim: claimed=%v err=%v, want true/nil", claimed, err)
+	}
+
+	claimed, err := st.Claim("spoke-a", "cert-a", time.Hour)
+	if err != nil {
+		t.Fatalf("second Claim: %v", err)
+	}
+	if claimed {
+		t.Error("got claimed=true for an already-claimed, unexpired cert, want false")
+	}
+}
+
+func TestClaim_SucceedsAfterExpiry(t *testing.T) {
+	st := openTestStore(t)
+	// A negative lease duration puts claim_expires_at in the past
+	// immediately - the same "already expired" state a real lease would
+	// eventually reach on its own, without needing to sleep in a test.
+	if claimed, err := st.Claim("spoke-a", "cert-a", -time.Minute); err != nil || !claimed {
+		t.Fatalf("first Claim (already-expired lease): claimed=%v err=%v, want true/nil", claimed, err)
+	}
+
+	claimed, err := st.Claim("spoke-a", "cert-a", time.Hour)
+	if err != nil {
+		t.Fatalf("second Claim: %v", err)
+	}
+	if !claimed {
+		t.Error("got claimed=false against an expired prior claim, want true")
+	}
+}
+
+// TestClaim_ConcurrentCallersOnlyOneSucceeds is the real-behavior proof:
+// two actual goroutines racing against one real temp-file database, not
+// an assumption that the WHERE-guarded UPSERT is atomic. Exercises the
+// mechanism this whole feature exists for - preventing two overlapping
+// attempts for the same certificate from both proceeding at once.
+func TestClaim_ConcurrentCallersOnlyOneSucceeds(t *testing.T) {
+	st := openTestStore(t)
+
+	const attempts = 20
+	var wg sync.WaitGroup
+	results := make(chan bool, attempts)
+
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func() {
+			defer wg.Done()
+			claimed, err := st.Claim("spoke-a", "cert-a", time.Hour)
+			if err != nil {
+				t.Errorf("Claim: %v", err)
+				return
+			}
+			results <- claimed
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for claimed := range results {
+		if claimed {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("got %d successful claims out of %d concurrent attempts, want exactly 1", successes, attempts)
 	}
 }

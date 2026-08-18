@@ -276,6 +276,92 @@ func TestDue_NearExpiryIsDue(t *testing.T) {
 	}
 }
 
+// TestDue_ClaimsRenewalLeaseWhenDue proves handleDue's claim side effect
+// directly against the store: a due cert's answer of "due" leaves behind
+// an actual, unexpired claim - not just a boolean response with no
+// tracked state backing it.
+func TestDue_ClaimsRenewalLeaseWhenDue(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+
+	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var got dueResponse
+	json.NewDecoder(resp.Body).Decode(&got)
+	if !got.Due {
+		t.Fatal("got due=false, want true")
+	}
+
+	cs, err := s.store.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !cs.ClaimExpiresAt.Valid || !cs.ClaimExpiresAt.Time.After(time.Now()) {
+		t.Errorf("got claim_expires_at %v, want a real, unexpired lease after a due=true response", cs.ClaimExpiresAt)
+	}
+}
+
+// TestDue_SecondCallWhileClaimedReportsNotDue is the actual proof of the
+// duplicate-renewal-prevention mechanism through the real HTTP endpoint: a
+// second /due call for a cert that's already claimed (and would otherwise
+// be due) must report due=false, not let a second caller also proceed.
+func TestDue_SecondCallWhileClaimedReportsNotDue(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+
+	resp1 := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var got1 dueResponse
+	json.NewDecoder(resp1.Body).Decode(&got1)
+	if !got1.Due {
+		t.Fatal("first call: got due=false, want true")
+	}
+
+	resp2 := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var got2 dueResponse
+	json.NewDecoder(resp2.Body).Decode(&got2)
+	if got2.Due {
+		t.Error("second call while the first's claim is still active: got due=true, want false")
+	}
+}
+
+// TestDue_ClaimReleasedByCheckinAllowsAnotherClaim proves the lease is
+// actually released (not just eventually self-expiring) once the holder's
+// attempt completes and checks in - a claimed-then-checked-in cert due
+// again later must be claimable again, not stuck until RenewalLeaseDuration
+// elapses for no reason.
+func TestDue_ClaimReleasedByCheckinAllowsAnotherClaim(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+
+	resp1 := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var got1 dueResponse
+	json.NewDecoder(resp1.Body).Decode(&got1)
+	if !got1.Due {
+		t.Fatal("first call: got due=false, want true")
+	}
+
+	// The claim holder's attempt fails and checks in - CheckinFailed
+	// releases the claim unconditionally (see its doc comment), and the
+	// cert is still within the renewal window, so it should be claimable
+	// again immediately rather than waiting out the lease.
+	failedBody, _ := json.Marshal(checkinRequest{Domains: []string{"example.com"}, Status: "failed", Error: "dns01 present failed"})
+	if resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", failedBody); resp.Code != 204 {
+		t.Fatalf("checkin: got status %d, want 204, body=%s", resp.Code, resp.Body.String())
+	}
+
+	resp2 := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
+	var got2 dueResponse
+	json.NewDecoder(resp2.Body).Decode(&got2)
+	if !got2.Due {
+		t.Error("got due=false after the prior claim was released by a checkin, want true")
+	}
+}
+
 func TestDue_PerCertRenewBeforeOverridesDefault(t *testing.T) {
 	cfg := testConfig()
 	// Override just this cert's renewal policy to 1 hour, far shorter than

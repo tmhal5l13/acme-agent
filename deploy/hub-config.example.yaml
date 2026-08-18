@@ -43,6 +43,15 @@ notify_timeout: 30s
 # poll_interval.
 # watchdog_stale_after: 2h
 
+# Optional. How long a claimed renewal lease lasts before it self-expires
+# - the mechanism that stops two overlapping attempts for the same
+# certificate from both proceeding at once (e.g. two processes of one
+# spoke running concurrently after a botched restart). See
+# ARCHITECTURE.md "Renewal lease/claim". Defaults to 15m, comfortably
+# longer than a real issue/renew cycle but short enough that a genuinely
+# crashed spoke doesn't block retries for long.
+# renewal_lease_duration: 15m
+
 # Optional. Bounds a single DNS-01 present/cleanup relay call to the real
 # DNS provider before the hub gives up and returns an error to the
 # requesting spoke — see ARCHITECTURE.md "Hub network hardening". Defaults
