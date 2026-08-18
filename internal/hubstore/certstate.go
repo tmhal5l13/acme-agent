@@ -104,3 +104,35 @@ func (s *Store) Get(spokeID, name string) (*CertState, error) {
 	}
 	return &cs, nil
 }
+
+// All returns every spoke_cert_state row - every certificate any spoke has
+// ever checked in for, across all spokes. Unlike Get, a certificate
+// configured but never checked in simply doesn't appear here at all
+// (there's no row for it yet); callers wanting to show those too (the
+// hub's status API and staleness watchdog both do) need to separately
+// cross-reference this against the hub's config.
+func (s *Store) All() ([]CertState, error) {
+	rows, err := s.db.Query(`
+		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at
+		FROM spoke_cert_state`)
+	if err != nil {
+		return nil, fmt.Errorf("query all cert states: %w", err)
+	}
+	defer rows.Close()
+
+	states := []CertState{}
+	for rows.Next() {
+		var cs CertState
+		if err := rows.Scan(
+			&cs.SpokeID, &cs.Name, &cs.NotBefore, &cs.NotAfter, &cs.SerialNumber, &cs.Status,
+			&cs.LastCheckinAt, &cs.LastError, &cs.ConsecutiveFailures, &cs.LastSuccessAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan cert state row: %w", err)
+		}
+		states = append(states, cs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cert state rows: %w", err)
+	}
+	return states, nil
+}

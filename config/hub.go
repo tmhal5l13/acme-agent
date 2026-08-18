@@ -63,6 +63,17 @@ type HubConfig struct {
 	// propagation wait) since both bound the same underlying call from
 	// either side of the relay.
 	DNSProviderTimeout Duration `yaml:"dns_provider_timeout"`
+
+	// StatusToken, if set, gates GET /v1/status - a read-only, fleet-wide
+	// view of every certificate's renewal health (status, failure streak,
+	// last success, expiry). Deliberately separate from a spoke's own
+	// bearer token: a spoke's token only ever authorizes it for its own
+	// certificates (see internal/hubapi.authorize), which would defeat
+	// the point of a fleet-wide dashboard - this is a second, distinct
+	// credential for whoever should have that wider view (an operator,
+	// a monitoring system), not tied to any one spoke. Left empty, the
+	// endpoint doesn't exist at all (see internal/hubapi.Handler).
+	StatusToken string `yaml:"status_token"`
 }
 
 // ACMEDefaultsConfig holds renewal policy defaults, overridable per cert via

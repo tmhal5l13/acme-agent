@@ -59,5 +59,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/certs/{name}/due", s.handleDue)
 	mux.HandleFunc("POST /v1/certs/{name}/dns01/present", s.handleDNS01Present)
 	mux.HandleFunc("POST /v1/certs/{name}/dns01/cleanup", s.handleDNS01Cleanup)
+	// /v1/status only exists at all when status_token is configured - see
+	// HubConfig.StatusToken's doc comment. Registering it unconditionally
+	// and rejecting every request when the token is empty would work too,
+	// but not existing is a clearer signal than a route that 401s forever.
+	if s.cfg.StatusToken != "" {
+		mux.HandleFunc("GET /v1/status", s.handleStatus)
+	}
 	return mux
 }

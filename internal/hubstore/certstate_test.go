@@ -157,3 +157,62 @@ func TestGet_UnknownCertReturnsErrNotFound(t *testing.T) {
 		t.Errorf("got error %v, want ErrNotFound", err)
 	}
 }
+
+func TestAll_EmptyStoreReturnsEmptySlice(t *testing.T) {
+	st := openTestStore(t)
+	got, err := st.All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if got == nil {
+		t.Error("got nil, want a non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d rows for an empty store, want 0", len(got))
+	}
+}
+
+func TestAll_ReturnsEveryRow(t *testing.T) {
+	st := openTestStore(t)
+	notBefore := time.Now()
+	notAfter := notBefore.Add(90 * 24 * time.Hour)
+
+	if err := st.CheckinActive("spoke-a", "cert-a", notBefore, notAfter, "serial-1"); err != nil {
+		t.Fatalf("CheckinActive spoke-a/cert-a: %v", err)
+	}
+	if err := st.CheckinActive("spoke-a", "cert-b", notBefore, notAfter, "serial-2"); err != nil {
+		t.Fatalf("CheckinActive spoke-a/cert-b: %v", err)
+	}
+	if err := st.CheckinFailed("spoke-b", "cert-c", errors.New("boom"), 3); err != nil {
+		t.Fatalf("CheckinFailed spoke-b/cert-c: %v", err)
+	}
+
+	got, err := st.All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d rows, want 3", len(got))
+	}
+
+	byKey := make(map[string]CertState, len(got))
+	for _, cs := range got {
+		byKey[cs.SpokeID+"/"+cs.Name] = cs
+	}
+
+	a, ok := byKey["spoke-a/cert-a"]
+	if !ok {
+		t.Fatal("missing spoke-a/cert-a")
+	}
+	if a.Status != "active" || a.SerialNumber.String != "serial-1" {
+		t.Errorf("spoke-a/cert-a: got status=%q serial=%v, want active/serial-1", a.Status, a.SerialNumber)
+	}
+
+	c, ok := byKey["spoke-b/cert-c"]
+	if !ok {
+		t.Fatal("missing spoke-b/cert-c")
+	}
+	if c.Status != "failed" || c.ConsecutiveFailures != 3 {
+		t.Errorf("spoke-b/cert-c: got status=%q consecutive_failures=%d, want failed/3", c.Status, c.ConsecutiveFailures)
+	}
+}
