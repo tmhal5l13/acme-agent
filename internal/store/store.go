@@ -27,8 +27,14 @@ type Store struct {
 // Open opens (creating if necessary) the SQLite database at path and applies
 // the schema. The schema.sql statements all use CREATE TABLE IF NOT EXISTS,
 // so this is safe to call on every process start.
+//
+// See hubstore.Open's doc comment for why _journal_mode=WAL and
+// _busy_timeout are set here too: the spoke agent's own writes are mostly
+// serialized already (RunOnce processes certs one at a time), but nothing
+// prevents a future concurrent access pattern from hitting the same
+// immediate-SQLITE_BUSY failure mode without this.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

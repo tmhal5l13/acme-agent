@@ -2,7 +2,10 @@ package hubstore
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,5 +130,71 @@ func TestOpen_IdempotentOnCurrentDatabase(t *testing.T) {
 	}
 	if cs.SerialNumber.String != "s1" {
 		t.Errorf("data did not survive reopening an already-current database: got serial %q, want %q", cs.SerialNumber.String, "s1")
+	}
+}
+
+// TestOpen_EnablesWALMode proves the _journal_mode=WAL DSN parameter
+// Open passes to modernc.org/sqlite actually took effect, by reading the
+// setting back from a real connection rather than trusting the DSN string
+// alone - a typo in the parameter name would otherwise fail silently.
+func TestOpen_EnablesWALMode(t *testing.T) {
+	st := openTestStore(t)
+
+	var mode string
+	if err := st.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Errorf("got journal_mode %q, want \"wal\"", mode)
+	}
+}
+
+// TestOpen_SetsBusyTimeout is TestOpen_EnablesWALMode's counterpart for
+// the other DSN parameter.
+func TestOpen_SetsBusyTimeout(t *testing.T) {
+	st := openTestStore(t)
+
+	var timeoutMS int
+	if err := st.db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeoutMS); err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if timeoutMS != 5000 {
+		t.Errorf("got busy_timeout %d, want 5000", timeoutMS)
+	}
+}
+
+// TestOpen_ConcurrentWritesDontFailImmediately is the real-behavior proof
+// that busy_timeout does what it's for: without it, one connection
+// holding SQLite's write lock makes another connection's concurrent write
+// fail immediately with SQLITE_BUSY ("database is locked") instead of
+// waiting for the lock to free up. Deliberately uses two real goroutines
+// against one real temp-file database rather than asserting anything
+// about the PRAGMA value alone, since that's the actual failure mode an
+// operator would see (a spoke's checkin getting a 500).
+func TestOpen_ConcurrentWritesDontFailImmediately(t *testing.T) {
+	st := openTestStore(t)
+
+	const writesPerGoroutine = 25
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*writesPerGoroutine)
+
+	writer := func(spokeID string) {
+		defer wg.Done()
+		for i := 0; i < writesPerGoroutine; i++ {
+			name := fmt.Sprintf("cert-%d", i)
+			if err := st.CheckinActive(spokeID, name, time.Now(), time.Now().Add(24*time.Hour), "s1"); err != nil {
+				errs <- err
+			}
+		}
+	}
+
+	wg.Add(2)
+	go writer("spoke-a")
+	go writer("spoke-b")
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent CheckinActive failed (want busy_timeout to make it wait, not fail): %v", err)
 	}
 }

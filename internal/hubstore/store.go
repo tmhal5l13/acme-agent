@@ -35,8 +35,18 @@ const currentSchemaVersion = 2
 // EXISTS, so re-running it is always safe; migrate handles the cases that
 // aren't just "create it if missing" — changing the shape of a table that
 // may already exist and already hold real data.
+//
+// The _journal_mode=WAL and _busy_timeout DSN parameters (applied by
+// modernc.org/sqlite to every connection it opens, not just the first —
+// see its conn.go) matter because database/sql pools multiple connections
+// to the same file: without them, SQLite's default rollback-journal mode
+// and zero busy_timeout mean one connection holding the write lock makes
+// any other connection's concurrent write fail immediately with
+// SQLITE_BUSY ("database is locked") rather than waiting for it — a real
+// risk here since every spoke checkin is a write, and this hub may be
+// serving several spokes at once.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
