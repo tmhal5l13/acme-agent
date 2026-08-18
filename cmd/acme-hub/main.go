@@ -93,6 +93,15 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Runs alongside the HTTP server for the process lifetime, stopping
+	// on the same ctx cancellation - see internal/hubapi.RunWatchdog for
+	// what it's for. watchdogScanInterval is how often it looks, not how
+	// stale something has to be to trip it (that's cfg.WatchdogStaleAfter,
+	// operator-configurable); a fixed, fairly frequent scan cadence is
+	// cheap (Store.All() against a local SQLite file) and keeps detection
+	// latency well under the staleness threshold itself.
+	go server.RunWatchdog(ctx, watchdogScanInterval)
+
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("acme-hub listening", "addr", cfg.ListenAddr, "tls_cert", cfg.TLSCertFile)
@@ -130,6 +139,8 @@ const (
 	// the http.Server literal's comment above.
 	writeTimeout = 5 * time.Minute
 	idleTimeout  = 2 * time.Minute
+
+	watchdogScanInterval = 5 * time.Minute
 )
 
 // ensureTLS makes sure cfg.TLSCertFile/TLSKeyFile exist, self-signing a

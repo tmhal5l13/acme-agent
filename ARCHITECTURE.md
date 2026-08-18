@@ -308,6 +308,13 @@ so the operator's script can use whichever pieces it needs:
 | `ACME_PREVIOUS_STATUS` | `active` |
 | `ACME_ERROR` | `issue certificate: obtain certificate: ...` |
 | `ACME_NOT_AFTER` | `2026-11-04T07:50:21Z` (RFC3339; last known good expiry) |
+| `ACME_REASON` | `no checkin since ...` (watchdog firings only — see "Hub-side staleness watchdog") |
+
+The same `notify_hook`/`notify_timeout` also drives `RunWatchdog`'s own
+firings (see "Hub-side staleness watchdog" below) — `ACME_STATUS: "stale"`
+on the way in, `ACME_PREVIOUS_STATUS: "unknown"` or the recovery pair
+(`"active"`/`"stale"`) on the way out — reusing this exact mechanism
+rather than a second, separate notification path.
 
 ```yaml
 notify_hook: "/etc/acme-hub/notify.sh"   # e.g. curl a webhook, or `mail -s ...`
@@ -576,6 +583,49 @@ checked in still appears, as `status: "unknown"` (`spoke_cert_state`'s own
 default), rather than silently missing from the response just because no
 row exists for it yet.
 
+## Hub-side staleness watchdog
+
+`notifyIfTransitioned` (see "Admin notifications" above) only fires on an
+explicit `"failed"` checkin *arriving* — by construction, a spoke that
+cannot reach the hub at all has no way to report that fact to the one
+endpoint it can't reach. From the hub's side, a spoke silently failing to
+connect looks identical to a healthy spoke with nothing due yet.
+`internal/hubapi.RunWatchdog` closes that gap: a periodic, hub-initiated
+scan (independent of any checkin arriving), launched by `cmd/acme-hub`
+alongside the HTTP server and stopped on the same shutdown signal.
+
+Each pass reuses `hubstore.Store.All()` (see "Status/dashboard API"
+above) merged against `cfg.Spokes`, and flags a certificate stale if
+either:
+
+- it has a real `last_checkin_at`, but longer ago than
+  `watchdog_stale_after` (default 2h — comfortably longer than the
+  spoke's own default 15-minute `poll_interval`, so normal poll jitter or
+  one slow pass never trips it) — a spoke that *was* reporting, then went
+  silent; or
+- it has never checked in at all, and has stayed in that state (per the
+  watchdog's own tracking — there's no real timestamp to measure from
+  when no checkin has ever happened) for longer than
+  `watchdog_stale_after` — giving a freshly onboarded spoke the same
+  grace period to actually check in for the first time that an
+  already-reporting spoke gets between checkins, rather than alerting on
+  the very next pass after `cmd/acme-onboard` adds it to config.
+
+The hub can't know any individual spoke's actual configured
+`poll_interval` (that's spoke-local config it never sees), so
+`watchdog_stale_after` is necessarily one hub-wide threshold, not a
+per-spoke one.
+
+Firing state (which certs have already been notified, so a still-stale
+one doesn't refire every single pass — the same alert-fatigue concern
+`notifyIfTransitioned` already guards against on the checkin path) is
+kept in memory, not persisted to `hubstore`: a hub restart clearing it
+just means at most one extra notification for something still genuinely
+stale, not a real problem, and it avoids coupling this feature to
+`hubstore`'s own schema migration sequence. A recovery (fresh checkin
+arrives for a cert the watchdog had flagged) fires a symmetric
+`ACME_STATUS=active ACME_PREVIOUS_STATUS=stale` notification.
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary including
@@ -587,10 +637,14 @@ row exists for it yet.
   by `DNSProviderTimeout` rather than hanging the handler forever,
   notify_hook transition detection including that a failed checkin's
   notification carries the certificate's real preserved expiry, not a
-  zero value, and the status API including that a spoke's own token
-  doesn't also work there and that a never-checked-in cert still appears
-  — all via real HTTP requests against a real temp-file SQLite store, with
-  a fake `challenge.Provider` standing in for a real DNS API),
+  zero value, the status API including that a spoke's own token doesn't
+  also work there and that a never-checked-in cert still appears, and
+  the staleness watchdog including that it doesn't refire every pass for
+  a still-stale cert, that recovery fires a symmetric notification, and
+  that a never-checked-in cert gets the same grace period a real checkin
+  history would — all via real HTTP requests against a real temp-file
+  SQLite store, with a fake `challenge.Provider` standing in for a real
+  DNS API),
   **`internal/hubstore`** (the `CheckinActive`/`CheckinFailed` split that
   keeps a failed renewal from erasing a still-valid certificate's known
   expiry, the failure-streak/last-success tracking, `All`'s fleet-wide
@@ -683,15 +737,6 @@ row exists for it yet.
   any public CA is currently permitted to issue — but a spoke can still
   lie within that plausible range. Closing this fully needs the stronger
   fix described above, not just a sanity bound.
-- **No hub-side staleness/expiry watchdog.** `notifyIfTransitioned` (see
-  "Admin notifications" above) only fires on an explicit "failed" checkin
-  arriving — by construction, a spoke that cannot reach the hub at all has
-  no way to report that fact to the one endpoint it can't reach. From the
-  hub's side, a spoke silently failing to connect looks identical to a
-  healthy spoke with nothing due yet. Closing this needs a periodic,
-  hub-initiated scan of `hubstore` for certificates whose expiry is
-  getting close or whose `last_checkin_at` is stale relative to how often
-  that spoke should be polling, independent of any checkin arriving.
 - **No certificate-revocation checking.** Nothing currently checks whether
   an installed certificate has been revoked; a revoked certificate would
   only be replaced on its normal renewal schedule. Let's Encrypt's OCSP

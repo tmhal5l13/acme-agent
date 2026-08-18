@@ -59,6 +59,7 @@ func testConfig() *config.HubConfig {
 	return &config.HubConfig{
 		ACMEDefaults:       config.ACMEDefaultsConfig{RenewBefore: config.Duration(30 * 24 * time.Hour)},
 		DNSProviderTimeout: config.Duration(3 * time.Minute),
+		WatchdogStaleAfter: config.Duration(2 * time.Hour),
 		Spokes: map[string]config.SpokeEntry{
 			"spoke-a": {
 				Token: "token-a",

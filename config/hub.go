@@ -74,6 +74,20 @@ type HubConfig struct {
 	// a monitoring system), not tied to any one spoke. Left empty, the
 	// endpoint doesn't exist at all (see internal/hubapi.Handler).
 	StatusToken string `yaml:"status_token"`
+
+	// WatchdogStaleAfter bounds how long a configured certificate can go
+	// without a checkin before internal/hubapi.RunWatchdog fires
+	// notify_hook — the case notifyIfTransitioned's checkin-triggered
+	// alerts structurally can't catch: a spoke that can't reach the hub at
+	// all has no way to report that fact to the one endpoint it can't
+	// reach, so it looks identical to a healthy spoke with nothing due yet
+	// until this fires. The hub can't know any individual spoke's actual
+	// configured poll_interval (that's spoke-local config), so this is
+	// necessarily one hub-wide threshold rather than a per-spoke one.
+	// Default (2h) is comfortably longer than the spoke's own default
+	// 15-minute poll_interval, so normal poll jitter or one slow pass
+	// never trips it.
+	WatchdogStaleAfter Duration `yaml:"watchdog_stale_after"`
 }
 
 // ACMEDefaultsConfig holds renewal policy defaults, overridable per cert via
@@ -126,6 +140,7 @@ const (
 	defaultNotifyTimeout      = 30 * time.Second
 	defaultRenewalJitter      = 48 * time.Hour
 	defaultDNSProviderTimeout = 3 * time.Minute
+	defaultWatchdogStaleAfter = 2 * time.Hour
 )
 
 // LoadHubConfig reads, expands, parses, and validates the hub's config file.
@@ -159,6 +174,9 @@ func (c *HubConfig) applyDefaults() {
 	}
 	if c.DNSProviderTimeout == 0 {
 		c.DNSProviderTimeout = Duration(defaultDNSProviderTimeout)
+	}
+	if c.WatchdogStaleAfter == 0 {
+		c.WatchdogStaleAfter = Duration(defaultWatchdogStaleAfter)
 	}
 	if c.TLSCertFile == "" {
 		c.TLSCertFile = filepath.Join(c.DataDir, "tls", "cert.pem")
