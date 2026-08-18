@@ -28,6 +28,15 @@ type checkinRequest struct {
 	ConsecutiveFailures int `json:"consecutive_failures"`
 }
 
+// maxPlausibleCertLifetime is a generous, not tight, upper bound on
+// not_after - not_before: 398 days is the maximum lifetime any public CA
+// is currently permitted to issue under the CA/Browser Forum's baseline
+// requirements. A private CA reached via acme.directory_url/ca_cert_file
+// could legitimately issue something longer, so this exists to catch an
+// implausible value, not to enforce the public-CA ceiling as policy — see
+// validate's doc comment for what specific risk this closes.
+const maxPlausibleCertLifetime = 398 * 24 * time.Hour
+
 // validate rejects a checkin that's malformed or internally inconsistent
 // before it ever reaches storage — not a substitute for actually verifying
 // the reported certificate (the hub has no independent way to confirm
@@ -36,11 +45,22 @@ type checkinRequest struct {
 // fingerprint, not just self-reported fields — see "Known gaps"). This
 // only catches internally-inconsistent or nonsensical values: a status
 // outside the two the real client ever sends, an "active" checkin with no
-// serial, or a validity window that doesn't make sense on its own terms
-// (not_before on or after not_after). "failed" intentionally isn't held to
-// the same requirements — internal/spokeagent's fail() reports it with a
-// zero NotBefore/NotAfter/Serial, since there's no newly-issued
-// certificate to describe.
+// serial, a validity window that doesn't make sense on its own terms
+// (not_before on or after not_after), or one implausibly long. "failed"
+// intentionally isn't held to the same requirements — internal/spokeagent's
+// fail() reports it with a zero NotBefore/NotAfter/Serial, since there's
+// no newly-issued certificate to describe.
+//
+// The implausible-lifetime check exists for a specific reason: a spoke
+// with a stolen or leaked bearer token can report whatever it wants on an
+// "active" checkin, and handleDue trusts the reported not_after verbatim
+// to decide whether renewal is due. Without this check, reporting a
+// not_after decades in the future would suppress renewal indefinitely.
+// This doesn't fully close that gap — a spoke can still lie within the
+// plausible range — but it defeats the specific far-future version of the
+// attack at effectively no cost. See "Known gaps" for the fuller fix this
+// stops short of (the hub independently verifying the reported fields
+// against the certificate itself).
 func (r checkinRequest) validate() error {
 	if r.Status != "active" && r.Status != "failed" {
 		return fmt.Errorf("status must be %q or %q, got %q", "active", "failed", r.Status)
@@ -54,6 +74,10 @@ func (r checkinRequest) validate() error {
 		}
 		if !r.NotBefore.Before(r.NotAfter) {
 			return fmt.Errorf("not_before must be before not_after")
+		}
+		if r.NotAfter.Sub(r.NotBefore) > maxPlausibleCertLifetime {
+			return fmt.Errorf("not_after is %s after not_before, longer than any plausible certificate lifetime (%s)",
+				r.NotAfter.Sub(r.NotBefore), maxPlausibleCertLifetime)
 		}
 	}
 	return nil

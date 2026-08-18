@@ -185,6 +185,39 @@ func TestCheckin_ActiveWithNotBeforeNotAfterNonsenseRejected(t *testing.T) {
 	}
 }
 
+// TestCheckin_ImplausibleNotAfterRejected is the actual proof of the
+// sanity-ceiling mitigation: a stolen/leaked bearer token can't be used to
+// suppress renewal indefinitely by reporting a far-future not_after,
+// since handleDue would otherwise trust it verbatim. A normal ~90-day
+// window is still accepted.
+func TestCheckin_ImplausibleNotAfterRejected(t *testing.T) {
+	cases := []struct {
+		name     string
+		lifetime time.Duration
+		wantErr  bool
+	}{
+		{"normal 90-day cert", 90 * 24 * time.Hour, false},
+		{"at the 398-day ceiling", 398 * 24 * time.Hour, false},
+		{"just past the ceiling", 399 * 24 * time.Hour, true},
+		{"years in the future", 10 * 365 * 24 * time.Hour, true},
+	}
+	for _, c := range cases {
+		s := newTestServer(t, testConfig(), nil)
+		now := time.Now()
+		body, _ := json.Marshal(checkinRequest{
+			Domains: []string{"example.com"}, NotBefore: now, NotAfter: now.Add(c.lifetime),
+			Serial: "abc123", Status: "active",
+		})
+		resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+		if c.wantErr && resp.Code != 400 {
+			t.Errorf("%s: got status %d, want 400", c.name, resp.Code)
+		}
+		if !c.wantErr && resp.Code != 204 {
+			t.Errorf("%s: got status %d, want 204, body=%s", c.name, resp.Code, resp.Body.String())
+		}
+	}
+}
+
 // TestCheckin_FailedStatusDoesNotRequireCertFields proves the validation
 // added above doesn't break the real client: internal/spokeagent's fail()
 // reports "failed" checkins with a zero NotBefore/NotAfter/Serial (there's
