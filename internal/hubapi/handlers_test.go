@@ -133,6 +133,18 @@ func TestCheckin_InvalidBody(t *testing.T) {
 	}
 }
 
+// TestCheckin_OversizedBodyRejected proves the http.MaxBytesReader wired
+// into handleCheckin actually bounds what it reads, rather than buffering
+// an arbitrarily large body from an authenticated-but-misbehaving spoke.
+func TestCheckin_OversizedBodyRejected(t *testing.T) {
+	s := newTestServer(t, testConfig(), nil)
+	oversized := bytes.Repeat([]byte("a"), maxRequestBodyBytes+1)
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", oversized)
+	if resp.Code != 400 {
+		t.Fatalf("got status %d, want 400 for an oversized body, body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestCheckin_UnknownStatusRejected(t *testing.T) {
 	s := newTestServer(t, testConfig(), nil)
 	body, _ := json.Marshal(checkinRequest{

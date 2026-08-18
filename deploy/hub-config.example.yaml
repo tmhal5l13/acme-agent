@@ -35,6 +35,12 @@ acme_defaults:
 # notify_hook: "/etc/acme-hub/notify.sh"
 notify_timeout: 30s
 
+# Optional. Bounds a single DNS-01 present/cleanup relay call to the real
+# DNS provider before the hub gives up and returns an error to the
+# requesting spoke — see ARCHITECTURE.md "Hub network hardening". Defaults
+# to 3m, matching the spoke's own dns01_timeout default.
+# dns_provider_timeout: 3m
+
 dns_providers:
   route53_main:
     type: route53

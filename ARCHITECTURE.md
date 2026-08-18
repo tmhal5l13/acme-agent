@@ -111,6 +111,14 @@ Plain `sha256sum hub-cert.pem` will **not** match — it hashes the raw PEM
 file's text encoding, not the parsed certificate bytes the fingerprint
 above is computed from.
 
+Both sides pin `MinVersion: tls.VersionTLS13` explicitly rather than
+relying on Go's own default (which has been TLS 1.2 for a long time, but
+isn't guaranteed to stay wherever it currently is across future Go
+upgrades) — safe to require outright since both ends of this connection
+are always this project's own binaries, never a third-party TLS 1.2-only
+client. `internal/hubclient`'s tests prove this is actually enforced, not
+just set: a server that can't negotiate above TLS 1.2 fails the handshake.
+
 ## Package map
 
 | Package | Used by | Purpose |
@@ -504,17 +512,60 @@ real DNS-01 challenges to Pebble, proving the entire spoke↔hub↔CA pipeline
 end to end with no fakes anywhere in the chain, not just each half tested
 in isolation.
 
+## Hub network hardening
+
+- **Request bodies are size-limited.** `handleCheckin` and both dns01
+  handlers wrap the request body in `http.MaxBytesReader` (64KB — generous
+  for these short-string payloads, not a tight fit) before decoding, so an
+  authenticated-but-misbehaving spoke can't make the hub buffer an
+  arbitrarily large body per request.
+- **`http.Server` has real timeouts**, not Go's unbounded defaults:
+  `ReadHeaderTimeout`/`ReadTimeout` bound how long a client gets to
+  actually send a complete request, `IdleTimeout` bounds a kept-alive
+  connection sitting idle, and `WriteTimeout` bounds the whole
+  request-to-response cycle — set well above `dns_provider_timeout` (see
+  below) so a legitimately-slow DNS-01 relay isn't cut off before its own
+  timeout even has a chance to fire.
+- **DNS provider calls are bounded**, via `HubConfig.DNSProviderTimeout`
+  (default 3m, matching the spoke's own `dns01_timeout` default — both
+  bound the same underlying call from either side of the relay). This
+  needed a goroutine+channel wrapper (`internal/hubapi/dns01.go`'s
+  `withTimeout`), not a `context.Context`: lego's `challenge.Provider`
+  interface (`Present`/`CleanUp`) takes no context at all, in the pinned
+  lego version, and no context-aware variant exists. **The timeout only
+  stops the HTTP handler from blocking** — it has no way to actually
+  cancel the underlying DNS provider call, which keeps running to
+  completion or failure in the background regardless.
+- **Domain-name comparison is case- and trailing-dot-normalized**
+  (`domainAuthorized`) — a robustness fix, not a security one. The
+  unnormalized exact-string match it replaces already failed *closed*: a
+  case or trailing-dot mismatch produced a spurious 403, never let an
+  unauthorized domain through. Normalizing just stops an operator's
+  harmless capitalization difference between the hub's and spoke's config
+  from breaking an otherwise-correctly-authorized renewal.
+- **Both TLS endpoints pin `MinVersion: tls.VersionTLS13`** — see "TLS"
+  above.
+- **Bearer token comparison stays a plain map lookup**, deliberately not
+  `crypto/subtle.ConstantTimeCompare` — see `authorize`'s doc comment in
+  `internal/hubapi/auth.go` for why that pattern doesn't apply here (a map
+  lookup doesn't have the byte-by-byte timing-leak shape that pattern
+  exists to fix).
+
 ## Known gaps
 
-- **Test coverage exists for `internal/hubapi`** (auth boundary, per-cert
-  domain authorization, checkin including input validation, due including
-  per-cert policy override, dns01 relay, notify_hook transition detection
-  including that a failed checkin's notification carries the certificate's
-  real preserved expiry, not a zero value — all via real HTTP requests
-  against a real temp-file SQLite store, with a fake `challenge.Provider`
-  standing in for a real DNS API), **`internal/hubstore`** (the
-  `CheckinActive`/`CheckinFailed` split that keeps a failed renewal from
-  erasing a still-valid certificate's known expiry, the
+- **Test coverage exists for `internal/hubapi`** (auth boundary including
+  that a near-miss bearer token is rejected exactly like an unrelated one,
+  per-cert domain authorization including case/trailing-dot normalization,
+  checkin including input validation and oversized-body rejection, due
+  including per-cert policy override, dns01 relay including that a
+  provider call that never returns is bounded by `DNSProviderTimeout`
+  rather than hanging the handler forever, notify_hook transition
+  detection including that a failed checkin's notification carries the
+  certificate's real preserved expiry, not a zero value — all via real
+  HTTP requests against a real temp-file SQLite store, with a fake
+  `challenge.Provider` standing in for a real DNS API), **`internal/hubstore`**
+  (the `CheckinActive`/`CheckinFailed` split that keeps a failed renewal
+  from erasing a still-valid certificate's known expiry, the
   failure-streak/last-success tracking, and the `schema_meta` migration
   path against a hand-built pre-migration database),
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
@@ -522,8 +573,9 @@ in isolation.
   (including a round-trip through the real config loader), **`internal/hubclient`**
   (real TLS handshakes against a real listener using a real
   `internal/selfsigned` certificate — including that a client pinned to
-  the *wrong* certificate is actually rejected, not just that TLS is
-  nominally on), **`internal/selfsigned`** (SAN correctness for both IP
+  the *wrong* certificate is actually rejected, that a server unable to
+  negotiate above TLS 1.2 is rejected too, not just that TLS is nominally
+  on), **`internal/selfsigned`** (SAN correctness for both IP
   and DNS hosts, key file permissions, idempotency across restarts),
   **`internal/certwriter`** (bundle-swap atomicity via the `current`
   symlink, permissions, that a renewal fully replaces what `current`

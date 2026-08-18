@@ -51,8 +51,15 @@ func New(baseURL, token, caCertFile string) (*Client, error) {
 		return nil, fmt.Errorf("no certificate found in %s", caCertFile)
 	}
 
+	// MinVersion is pinned to TLS 1.3, not left at Go's own default: both
+	// ends of this connection are always this project's own binaries (the
+	// hub self-signs its own certificate specifically for this pinned
+	// relationship - see New's doc comment), so there's no third-party
+	// TLS 1.2-only peer to stay compatible with, and pinning removes any
+	// dependency on Go's default minimum version staying where it is
+	// across future Go upgrades.
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: pool},
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13},
 	}
 
 	return &Client{

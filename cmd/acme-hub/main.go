@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -71,6 +72,22 @@ func run() error {
 	httpServer := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: server.Handler(),
+		TLSConfig: &tls.Config{
+			// Both ends are always this project's own binaries (see
+			// internal/hubclient.New's identical MinVersion pin) - no
+			// third-party TLS 1.2-only peer needs to interoperate here.
+			MinVersion: tls.VersionTLS13,
+		},
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		// WriteTimeout bounds the whole request, including however long a
+		// handler takes to produce a response - it must stay comfortably
+		// above dnsProviderTimeout (the DNS-01 relay's own internal
+		// timeout, see internal/hubapi/dns01.go), or the connection would
+		// get cut before that timeout even has a chance to fire and
+		// return a real error to the spoke.
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -99,7 +116,21 @@ func run() error {
 	return nil
 }
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+
+	// readHeaderTimeout/readTimeout bound how long a client gets to
+	// actually send a complete request (headers, then body) - generous
+	// for these small checkin/dns01 JSON payloads, but not unbounded, so
+	// a slow-loris-style client can't hold a connection (and the
+	// goroutine serving it) open indefinitely.
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 10 * time.Second
+	// writeTimeout must stay comfortably above dnsProviderTimeout - see
+	// the http.Server literal's comment above.
+	writeTimeout = 5 * time.Minute
+	idleTimeout  = 2 * time.Minute
+)
 
 // ensureTLS makes sure cfg.TLSCertFile/TLSKeyFile exist, self-signing a
 // fresh certificate on first run if not (see internal/selfsigned for why

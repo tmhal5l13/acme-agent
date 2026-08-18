@@ -103,6 +103,62 @@ func TestClient_MismatchedCertRejected(t *testing.T) {
 	}
 }
 
+// startTLSServerCappedAtTLS12 is startTLSServer with the server's own
+// MaxVersion capped at TLS 1.2, for proving New's MinVersion pin actually
+// rejects a peer that can't speak TLS 1.3 rather than just being set and
+// never enforced.
+func startTLSServerCappedAtTLS12(t *testing.T, certPath, keyPath string) (addr string, shutdown func()) {
+	t.Helper()
+
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("load key pair: %v", err)
+	}
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MaxVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]bool{"due": true})
+		}),
+	}
+	go srv.Serve(ln)
+
+	return ln.Addr().String(), func() { srv.Close() }
+}
+
+// TestNew_RejectsServerBelowTLS13 proves the MinVersion pin in New's
+// tls.Config is actually enforced, not just set - a server that can't
+// negotiate above TLS 1.2 must fail the handshake outright.
+func TestNew_RejectsServerBelowTLS13(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := selfsigned.EnsureCert(certPath, keyPath, "127.0.0.1"); err != nil {
+		t.Fatalf("generate cert: %v", err)
+	}
+
+	addr, shutdown := startTLSServerCappedAtTLS12(t, certPath, keyPath)
+	defer shutdown()
+
+	client, err := New("https://"+addr, "test-token", certPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Due(ctx, "some-cert"); err == nil {
+		t.Fatal("expected a handshake error against a server capped at TLS 1.2, got nil")
+	}
+}
+
 func TestNew_UnreadableCertFileErrors(t *testing.T) {
 	_, err := New("https://127.0.0.1:1", "test-token", "/does/not/exist.pem")
 	if err == nil {
