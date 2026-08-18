@@ -440,6 +440,43 @@ remember to run — `internal/hubstore`'s tests cover both the upgrade path
 (a hand-built pre-migration database survives with its data intact) and the
 idempotent path (reopening an already-current database).
 
+## End-to-end testing with Pebble
+
+`internal/acmeclient/pebble_test.go` and `internal/hubapi/pebble_test.go`
+exercise the real ACME protocol — account registration and certificate
+issuance/renewal — against [Pebble](https://github.com/letsencrypt/pebble),
+Let's Encrypt's own small local ACME test server, instead of mocking it.
+This closes the gap real infrastructure testing (real Route53, real Let's
+Encrypt staging) couldn't: those need real credentials and can't run
+unattended, so `internal/acmeclient`'s actual `GetOrRegisterAccount`/`Issue`
+calls had zero automated coverage before this. Pebble needs neither — no
+DNS credentials, no network dependency on Let's Encrypt, and (unlike
+staging) no rate limits, so these tests can run repeatedly and offline.
+
+These tests are skipped, not run, by default — `go test ./...` stays green
+on a machine without Pebble installed. To run them:
+
+```
+go install github.com/letsencrypt/pebble/v2/cmd/pebble@latest
+go install github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest
+ACME_AGENT_E2E_TESTS=1 go test -run TestPebble ./internal/acmeclient/... ./internal/hubapi/...
+```
+
+Both packages launch their own Pebble + `pebble-challtestsrv` subprocesses
+on the same fixed ports (Pebble's directory and `pebble-challtestsrv`'s
+management API and DNS resolver aren't fully reconfigurable — its DoH
+listener in particular has no disabling flag). Running both packages'
+Pebble tests in the same invocation needs `go test -p 1` to serialize them;
+otherwise Go's default per-package parallelism runs two Pebble instances
+at once and they collide on those ports.
+
+`internal/hubapi/pebble_test.go`'s `TestPebble_HubRelay_FullIssuance` goes
+further than proving the ACME calls work — it drives a real
+`hubclient.Client` over real TLS to a real `hubapi.Server`, which relays
+real DNS-01 challenges to Pebble, proving the entire spoke↔hub↔CA pipeline
+end to end with no fakes anywhere in the chain, not just each half tested
+in isolation.
+
 ## Known gaps
 
 - **Test coverage exists for `internal/hubapi`** (auth boundary, per-cert
@@ -466,8 +503,11 @@ idempotent path (reopening an already-current database).
   resolves to without touching the prior version's own files), `config`
   (loading/validation, including the mutual-exclusivity and pairing rules
   around ACME CA flexibility — see above), `internal/acmeclient` (directory
-  URL resolution for `environment` vs `directory_url`, private-CA trust),
-  `internal/hook`, and `internal/dnsprovider`. Everything else —
+  URL resolution for `environment` vs `directory_url`, private-CA trust,
+  and — gated behind `ACME_AGENT_E2E_TESTS`, see "End-to-end testing with
+  Pebble" below — the actual `GetOrRegisterAccount`/`Issue` ACME protocol
+  calls against a real local ACME server, including the full spoke↔hub↔CA
+  relay path), `internal/hook`, and `internal/dnsprovider`. Everything else —
   `internal/store` and all three `cmd/` binaries — has been verified only
   by running real binaries against real infrastructure (a real Route53
   zone, Let's Encrypt staging) during development, not by `go test`.
