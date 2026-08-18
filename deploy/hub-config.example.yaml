@@ -35,6 +35,14 @@ acme_defaults:
 # notify_hook: "/etc/acme-hub/notify.sh"
 notify_timeout: 30s
 
+# Optional. How long a configured certificate can go without a checkin
+# before notify_hook fires - the case a "failed" checkin alone can't
+# catch: a spoke that can't reach the hub at all has no way to report
+# that. See ARCHITECTURE.md "Hub-side staleness watchdog". Defaults to
+# 2h, comfortably longer than the spoke's own default 15-minute
+# poll_interval.
+# watchdog_stale_after: 2h
+
 # Optional. Bounds a single DNS-01 present/cleanup relay call to the real
 # DNS provider before the hub gives up and returns an error to the
 # requesting spoke — see ARCHITECTURE.md "Hub network hardening". Defaults
