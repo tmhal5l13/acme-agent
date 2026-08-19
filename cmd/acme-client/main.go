@@ -19,6 +19,7 @@ import (
 	"github.com/tmhal5l13/acme-agent/internal/hubclient"
 	"github.com/tmhal5l13/acme-agent/internal/spokeagent"
 	"github.com/tmhal5l13/acme-agent/internal/store"
+	"github.com/tmhal5l13/acme-agent/internal/umask"
 )
 
 func main() {
@@ -33,7 +34,7 @@ func run() error {
 	once := flag.Bool("once", false, "run a single pass over all certificates, then exit (default: run as a daemon)")
 	flag.Parse()
 
-	syscall.Umask(0o077)
+	umask.Restrict()
 
 	cfg, err := config.LoadSpokeConfig(*configPath)
 	if err != nil {

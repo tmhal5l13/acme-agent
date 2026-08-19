@@ -69,3 +69,38 @@ jobs:
         env:
           ACME_AGENT_E2E_TESTS: "1"
         run: go test -p 1 ./internal/acmeclient/... ./internal/hubapi/... -run Pebble -v
+
+  cross-compile:
+    name: Cross-compile (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Build-only, no test run: there's no Windows/macOS runner here to
+      # execute the resulting binaries on, and this project has no cgo, so
+      # a clean `go build` for each target is what actually would have
+      # caught the syscall.Umask-on-Windows bug internal/umask fixes -
+      # catching a future regression like it here, automatically, rather
+      # than only when someone happens to try a cross-compile by hand.
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -o /dev/null ./cmd/acme-hub
+          go build -o /dev/null ./cmd/acme-client
+          go build -o /dev/null ./cmd/acme-onboard

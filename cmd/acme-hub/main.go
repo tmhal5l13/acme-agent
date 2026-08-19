@@ -27,6 +27,7 @@ import (
 	"github.com/tmhal5l13/acme-agent/internal/hubapi"
 	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 	"github.com/tmhal5l13/acme-agent/internal/selfsigned"
+	"github.com/tmhal5l13/acme-agent/internal/umask"
 )
 
 func main() {
@@ -40,7 +41,7 @@ func run() error {
 	configPath := flag.String("config", "./config.yaml", "path to the hub's config.yaml")
 	flag.Parse()
 
-	syscall.Umask(0o077)
+	umask.Restrict()
 
 	cfg, err := config.LoadHubConfig(*configPath)
 	if err != nil {
