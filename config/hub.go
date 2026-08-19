@@ -145,9 +145,31 @@ type SpokeEntry struct {
 
 // SpokeCertConfig is one certificate a spoke is authorized to manage.
 type SpokeCertConfig struct {
-	Name        string   `yaml:"name"`
-	Domains     []string `yaml:"domains"`
-	DNSProvider string   `yaml:"dns_provider"`
+	Name    string   `yaml:"name"`
+	Domains []string `yaml:"domains"`
+
+	// DNSProvider is which dns_providers entry relays DNS-01 for this
+	// cert's domains — the default for every domain in Domains, and the
+	// only provider used unless a domain has its own override in
+	// DomainDNSProviders. Let's Encrypt (and ACME generally) authorizes
+	// each SAN independently via its own DNS-01 challenge against that
+	// domain's own authoritative DNS - it has no concept of "DNS
+	// provider" at all, so nothing about the protocol requires every
+	// domain on one certificate to share a DNS backend. This field alone
+	// covers the overwhelmingly common case (every domain on one cert
+	// really is on the same provider); DomainDNSProviders exists for the
+	// rare case it isn't.
+	DNSProvider string `yaml:"dns_provider"`
+
+	// DomainDNSProviders optionally overrides DNSProvider for specific
+	// domains — keys must be entries already in Domains, values must be
+	// entries already in the hub's dns_providers (both checked in
+	// validate()). A domain not listed here uses DNSProvider like
+	// normal. Optional and almost always empty; only needed when one
+	// certificate's SAN list spans domains on genuinely different DNS
+	// backends.
+	DomainDNSProviders map[string]string `yaml:"domain_dns_providers"`
+
 	RenewBefore Duration `yaml:"renew_before"` // optional; 0 means "use ACMEDefaults.RenewBefore"
 }
 
@@ -257,6 +279,19 @@ func (c *HubConfig) validate() error {
 			}
 			if _, ok := c.DNSProviders[cert.DNSProvider]; !ok {
 				return fmt.Errorf("spokes[%s].certs[%s]: dns_provider %q is not defined under dns_providers", spokeID, cert.Name, cert.DNSProvider)
+			}
+
+			domainSet := make(map[string]bool, len(cert.Domains))
+			for _, d := range cert.Domains {
+				domainSet[d] = true
+			}
+			for domain, provider := range cert.DomainDNSProviders {
+				if !domainSet[domain] {
+					return fmt.Errorf("spokes[%s].certs[%s]: domain_dns_providers references domain %q, which is not in this cert's domains", spokeID, cert.Name, domain)
+				}
+				if _, ok := c.DNSProviders[provider]; !ok {
+					return fmt.Errorf("spokes[%s].certs[%s]: domain_dns_providers[%s]: dns_provider %q is not defined under dns_providers", spokeID, cert.Name, domain, provider)
+				}
 			}
 		}
 	}

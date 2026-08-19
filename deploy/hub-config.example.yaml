@@ -116,6 +116,8 @@ spokes:
         domains: [radius.example.com]
         dns_provider: route53_main
         # renew_before: 720h  # optional; overrides acme_defaults.renew_before for just this cert
+        # domain_dns_providers:  # optional; per-domain override when a cert's domains span more than one DNS backend - see ARCHITECTURE.md "Mixed DNS providers on one certificate"
+        #   radius.example.com: cloudflare_main
 
   nginx-spoke:
     tokens:

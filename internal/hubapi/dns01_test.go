@@ -77,6 +77,79 @@ func TestDomainAuthorized_NormalizesCaseAndTrailingDot(t *testing.T) {
 	}
 }
 
+// TestResolveDNSProvider_UsesOverrideOrFallsBackToDefault is
+// domainAuthorized's direct-unit-test pattern applied to
+// resolveDNSProvider: it doesn't gate on whether the domain is actually
+// authorized for the cert at all (domainAuthorized already did that
+// earlier in the handler) - it only decides which provider name a given
+// domain resolves to.
+func TestResolveDNSProvider_UsesOverrideOrFallsBackToDefault(t *testing.T) {
+	cert := config.SpokeCertConfig{
+		Domains:     []string{"example.com", "other.example.org"},
+		DNSProvider: "default-provider",
+		DomainDNSProviders: map[string]string{
+			"other.example.org": "override-provider",
+		},
+	}
+
+	cases := []struct {
+		domain string
+		want   string
+	}{
+		{"example.com", "default-provider"},
+		{"other.example.org", "override-provider"},
+		{"OTHER.EXAMPLE.ORG.", "override-provider"}, // same case/trailing-dot normalization as domainAuthorized
+		{"unrelated.com", "default-provider"},
+	}
+	for _, c := range cases {
+		if got := resolveDNSProvider(cert, c.domain); got != c.want {
+			t.Errorf("resolveDNSProvider(%q) = %q, want %q", c.domain, got, c.want)
+		}
+	}
+}
+
+// TestDNS01Present_DomainOverrideUsesDifferentProvider is
+// TestResolveDNSProvider_UsesOverrideOrFallsBackToDefault's end-to-end
+// counterpart: proves a single cert's two domains actually get relayed to
+// two different real challenge.Provider values through the real handler,
+// not just that resolveDNSProvider returns the right name in isolation -
+// the actual scenario this feature exists for (one certificate whose SAN
+// list spans domains on genuinely different DNS backends).
+func TestDNS01Present_DomainOverrideUsesDifferentProvider(t *testing.T) {
+	cfg := testConfig()
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Certs[0].DomainDNSProviders = map[string]string{"*.example.com": "fake2"}
+	cfg.Spokes["spoke-a"] = spoke
+
+	fakeDefault := &fakeDNSProvider{}
+	fakeOverride := &fakeDNSProvider{}
+	s := newTestServer(t, cfg, map[string]challenge.Provider{"fake": fakeDefault, "fake2": fakeOverride})
+
+	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
+	if resp.Code != 204 {
+		t.Fatalf("got status %d for the default-provider domain, want 204, body=%s", resp.Code, resp.Body.String())
+	}
+	if len(fakeDefault.presentCalls) != 1 {
+		t.Errorf("got %d Present calls on the default provider, want 1", len(fakeDefault.presentCalls))
+	}
+	if len(fakeOverride.presentCalls) != 0 {
+		t.Errorf("got %d Present calls on the override provider for a domain that wasn't overridden, want 0", len(fakeOverride.presentCalls))
+	}
+
+	body2, _ := json.Marshal(dns01Request{Domain: "*.example.com", Token: "tok", KeyAuth: "tok.auth"})
+	resp2 := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body2)
+	if resp2.Code != 204 {
+		t.Fatalf("got status %d for the overridden domain, want 204, body=%s", resp2.Code, resp2.Body.String())
+	}
+	if len(fakeOverride.presentCalls) != 1 {
+		t.Errorf("got %d Present calls on the override provider, want 1", len(fakeOverride.presentCalls))
+	}
+	if len(fakeDefault.presentCalls) != 1 {
+		t.Errorf("got %d Present calls on the default provider after the overridden-domain request, want still 1 (unaffected)", len(fakeDefault.presentCalls))
+	}
+}
+
 // TestDNS01Present_DomainNormalization_EndToEnd is the HTTP-level version
 // of the same proof, going through the real handler and a real
 // challenge.Provider rather than calling domainAuthorized directly.
