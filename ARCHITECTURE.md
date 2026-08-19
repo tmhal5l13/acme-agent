@@ -232,6 +232,52 @@ Secrets for both binaries live in an `EnvironmentFile` (`acme-hub.env` /
 via `${VAR}` — never written into `config.yaml` itself, which is why that
 file can safely stay world-readable (`0644`).
 
+## Cross-platform builds
+
+All three binaries are pure Go (no cgo — `modernc.org/sqlite` was chosen
+specifically to avoid it, see `internal/store`/`internal/hubstore`), so
+cross-compiling for another OS/architecture needs nothing beyond `GOOS`/
+`GOARCH`, from any build machine:
+
+```
+GOOS=windows GOARCH=amd64 go build ./cmd/acme-hub
+GOOS=darwin  GOARCH=arm64 go build ./cmd/acme-hub   # Apple Silicon
+GOOS=darwin  GOARCH=amd64 go build ./cmd/acme-hub   # Intel
+```
+
+The systemd deployment above (`deploy/`) is Linux-only and this project's
+only tested production target; Windows/macOS builds exist so the code
+*compiles* cleanly for anyone who wants to run a spoke there, not as a
+supported deployment path with its own install tooling.
+
+Two real platform gaps to know about:
+
+- **No process umask on Windows.** `internal/umask` restricts the process
+  umask to `0077` (owner-only) before either binary creates any files —
+  Unix only, via a `//go:build !windows` file. Windows has no umask
+  concept at all (`syscall.Umask` isn't defined there), and file access is
+  governed by ACLs inherited from the parent directory instead, which this
+  project does not currently set restrictively. `umask_windows.go` is a
+  deliberate no-op documenting this, not a silent gap — a Windows spoke's
+  data directory permissions are whatever the parent directory's ACLs
+  already grant.
+- **Cross-compiled macOS binaries aren't code-signed.** `go build` run
+  natively on a Mac ad-hoc-signs its own `darwin/arm64` output
+  automatically; a binary cross-compiled from Linux/Windows isn't signed
+  at all, and Apple Silicon's kernel refuses to execute any unsigned
+  binary outright (not a dismissible Gatekeeper prompt — it won't launch).
+  Run `codesign --sign - <binary>` (ad-hoc, no Apple Developer account
+  needed) on the target Mac after transferring it. Intel Macs are more
+  lenient about unsigned binaries but that population is shrinking.
+
+CI's `cross-compile` job builds all three binaries for `windows/amd64`,
+`darwin/amd64`, and `darwin/arm64` on every push/PR — a `go build` check
+only, not a full test run (there's no Windows/macOS runner executing the
+test suite) — specifically so a future platform-incompatible call (like
+`syscall.Umask` was before `internal/umask` existed) fails CI immediately
+instead of only surfacing the next time someone happens to try a
+cross-compile by hand.
+
 ## Onboarding a spoke
 
 `cmd/acme-onboard` exists because hand-editing two separate YAML files (the
