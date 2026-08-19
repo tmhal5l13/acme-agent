@@ -289,6 +289,45 @@ surfacing the next time someone happens to try a cross-compile by hand.
 `darwin/amd64` is deliberately not in this matrix, per the Intel Mac note
 above.
 
+## Mixed DNS providers on one certificate
+
+`SpokeCertConfig.DNSProvider` is the default `dns_providers` entry for
+every domain on a cert, and covers the overwhelmingly common case where
+all of a cert's domains really do share one DNS backend. It's a default,
+not a hard requirement, though: ACME (RFC 8555) authorizes each SAN on a
+multi-domain certificate completely independently — DNS-01 means a
+separate `_acme-challenge.<domain>` lookup per domain, validated against
+that domain's own authoritative DNS — the CA has no concept of "DNS
+provider" and doesn't require every domain on one certificate to share
+one. So one certificate legitimately can span two different DNS backends
+(e.g. a primary domain on Route53 and a secondary brand domain still on
+Cloudflare), and this project doesn't need to fight that.
+
+`SpokeCertConfig.DomainDNSProviders` is the (optional, almost always
+empty) per-domain override for exactly that case:
+
+```yaml
+certs:
+  - name: multi-cert
+    domains: [example.com, example.org]
+    dns_provider: route53_main       # default: used for any domain not listed below
+    domain_dns_providers:
+      example.org: cloudflare_main   # this one domain uses a different provider
+```
+
+The DNS-01 relay handlers (`internal/hubapi/dns01.go`) already relay one
+domain per request — the spoke's `hubclient.DNS01Provider` and lego's own
+multi-SAN issuance both already call `Present`/`CleanUp` once per domain —
+so resolving the provider per-domain (`resolveDNSProvider`, checking
+`DomainDNSProviders` before falling back to `DNSProvider`) needed no
+change anywhere else in the relay path: not `internal/acmeclient`, not
+`internal/hubclient`, nothing spoke-side at all. `HubConfig.validate()`
+rejects an override referencing a domain not actually in that cert's
+`domains` (almost certainly a typo) or a provider not defined under
+`dns_providers`, the same two checks already applied to the cert-level
+`dns_provider` field. `internal/onboard`'s `Request.DomainDNSProviders`
+mirrors this for the generated hub config snippet.
+
 ## Onboarding a spoke
 
 `cmd/acme-onboard` exists because hand-editing two separate YAML files (the

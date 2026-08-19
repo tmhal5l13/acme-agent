@@ -115,6 +115,49 @@ func TestHubConfig_RejectsNoTokens(t *testing.T) {
 	}
 }
 
+// TestHubConfig_DomainDNSProvidersOverrideValid proves a cert's domains can
+// span two different dns_providers entries — the actual feature this field
+// exists for (see SpokeCertConfig.DomainDNSProviders's doc comment: ACME
+// authorizes each SAN independently, so nothing requires one cert's
+// domains to share a DNS backend).
+func TestHubConfig_DomainDNSProvidersOverrideValid(t *testing.T) {
+	cfg := validHubConfig()
+	cfg.DNSProviders["cloudflare"] = DNSProviderConfig{Type: "cloudflare"}
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Certs[0].Domains = []string{"example.com", "example.org"}
+	spoke.Certs[0].DomainDNSProviders = map[string]string{"example.org": "cloudflare"}
+	cfg.Spokes["spoke-a"] = spoke
+
+	if err := cfg.validate(); err != nil {
+		t.Errorf("unexpected error for a valid domain_dns_providers override: %v", err)
+	}
+}
+
+func TestHubConfig_DomainDNSProvidersRejectsDomainNotOnCert(t *testing.T) {
+	cfg := validHubConfig()
+	cfg.DNSProviders["cloudflare"] = DNSProviderConfig{Type: "cloudflare"}
+	spoke := cfg.Spokes["spoke-a"]
+	// cert-a's Domains is still just ["example.com"] — this override names
+	// a domain that was never added to it, almost certainly a typo.
+	spoke.Certs[0].DomainDNSProviders = map[string]string{"example.org": "cloudflare"}
+	cfg.Spokes["spoke-a"] = spoke
+
+	if err := cfg.validate(); err == nil {
+		t.Error("expected an error for domain_dns_providers referencing a domain not in this cert's domains, got nil")
+	}
+}
+
+func TestHubConfig_DomainDNSProvidersRejectsUnknownProvider(t *testing.T) {
+	cfg := validHubConfig()
+	spoke := cfg.Spokes["spoke-a"]
+	spoke.Certs[0].DomainDNSProviders = map[string]string{"example.com": "does-not-exist"}
+	cfg.Spokes["spoke-a"] = spoke
+
+	if err := cfg.validate(); err == nil {
+		t.Error("expected an error for domain_dns_providers referencing an undefined dns_provider, got nil")
+	}
+}
+
 func TestHubConfig_RejectsUnknownDNSProvider(t *testing.T) {
 	cfg := validHubConfig()
 	spoke := cfg.Spokes["spoke-a"]

@@ -63,12 +63,14 @@ func (s *Server) handleDNS01(w http.ResponseWriter, r *http.Request, do func(cha
 		return
 	}
 
-	provider, ok := s.dnsProviders[cert.DNSProvider]
+	providerName := resolveDNSProvider(cert, req.Domain)
+	provider, ok := s.dnsProviders[providerName]
 	if !ok {
 		// Config validation at load time already guarantees every cert's
-		// dns_provider references a defined entry, so this would mean a
-		// bug in that validation, not a bad request.
-		slog.Error("dns01 request: dns provider not found", "provider", cert.DNSProvider)
+		// dns_provider (and every domain_dns_providers override) references
+		// a defined entry, so this would mean a bug in that validation, not
+		// a bad request.
+		slog.Error("dns01 request: dns provider not found", "provider", providerName)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -109,6 +111,24 @@ func domainAuthorized(cert config.SpokeCertConfig, domain string) bool {
 
 func normalizeDomain(d string) string {
 	return strings.ToLower(strings.TrimSuffix(d, "."))
+}
+
+// resolveDNSProvider returns which dns_providers entry should handle
+// domain for cert: its entry in DomainDNSProviders if one exists, else
+// cert's own DNSProvider default — see SpokeCertConfig.DomainDNSProviders'
+// doc comment for why a single cert's domains can span more than one DNS
+// provider at all. Matched with the same case/trailing-dot normalization
+// domainAuthorized uses, for the same reason: a spoke's request and the
+// hub's own config shouldn't have to agree on formatting exactly for an
+// otherwise-correct match to work.
+func resolveDNSProvider(cert config.SpokeCertConfig, domain string) string {
+	want := normalizeDomain(domain)
+	for d, provider := range cert.DomainDNSProviders {
+		if normalizeDomain(d) == want {
+			return provider
+		}
+	}
+	return cert.DNSProvider
 }
 
 // withTimeout runs fn, returning its error if it completes within

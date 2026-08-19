@@ -207,6 +207,52 @@ func TestPlan_HubConfigYAMLContainsExpectedFields(t *testing.T) {
 	}
 }
 
+// TestPlan_DomainDNSProvidersOverrideAppearsInSnippet proves a request
+// spanning two DNS providers actually produces a usable domain_dns_providers
+// block in the generated hub config snippet - see
+// config.SpokeCertConfig.DomainDNSProviders for why one cert's domains can
+// need this at all.
+func TestPlan_DomainDNSProvidersOverrideAppearsInSnippet(t *testing.T) {
+	cfg := testHubConfig()
+	cfg.DNSProviders["cloudflare_main"] = config.DNSProviderConfig{Type: "cloudflare"}
+
+	req := validRequest()
+	req.Domains = []string{"new.example.com", "new.example.org"}
+	req.DomainDNSProviders = map[string]string{"new.example.org": "cloudflare_main"}
+
+	result, err := Plan(cfg, req)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	for _, want := range []string{"domain_dns_providers:", "new.example.org: cloudflare_main"} {
+		if !strings.Contains(result.HubConfigYAML, want) {
+			t.Errorf("hub config YAML missing %q:\n%s", want, result.HubConfigYAML)
+		}
+	}
+}
+
+func TestPlan_DomainDNSProvidersRejectsDomainNotInRequest(t *testing.T) {
+	req := validRequest()
+	// req.Domains is ["new.example.com"] - this override references a
+	// domain that was never added to the request, almost certainly a typo.
+	req.DomainDNSProviders = map[string]string{"other.example.org": req.DNSProvider}
+
+	_, err := Plan(testHubConfig(), req)
+	if err == nil {
+		t.Fatal("expected an error for domain_dns_providers referencing a domain not in Domains, got nil")
+	}
+}
+
+func TestPlan_DomainDNSProvidersRejectsUnknownProvider(t *testing.T) {
+	req := validRequest()
+	req.DomainDNSProviders = map[string]string{req.Domains[0]: "does-not-exist"}
+
+	_, err := Plan(testHubConfig(), req)
+	if err == nil {
+		t.Fatal("expected an error for domain_dns_providers referencing an undefined dns_provider, got nil")
+	}
+}
+
 func TestPlanRotation_UnknownSpokeErrors(t *testing.T) {
 	_, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "no-such-spoke"})
 	if err == nil {

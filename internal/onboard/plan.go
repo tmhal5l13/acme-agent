@@ -7,6 +7,7 @@ package onboard
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/tmhal5l13/acme-agent/config"
@@ -17,8 +18,17 @@ type Request struct {
 	SpokeID     string
 	CertName    string
 	Domains     []string
-	DNSProvider string // must already exist in the hub's dns_providers
-	HubURL      string
+	DNSProvider string // default dns_provider for every domain above; must already exist in the hub's dns_providers
+
+	// DomainDNSProviders optionally overrides DNSProvider for specific
+	// domains — keys must be entries already in Domains, values must
+	// already exist in the hub's dns_providers, same as DNSProvider.
+	// Optional and almost always empty; see
+	// config.SpokeCertConfig.DomainDNSProviders for why a cert's domains
+	// can span more than one DNS provider at all.
+	DomainDNSProviders map[string]string
+
+	HubURL string
 	// HubTLSCertFile is the local path, on this new spoke, where the hub's
 	// certificate will be copied to — Plan only writes this path into the
 	// generated config, it can't copy the file itself, since it has no
@@ -74,6 +84,19 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 	}
 	if _, ok := hubCfg.DNSProviders[req.DNSProvider]; !ok {
 		return nil, fmt.Errorf("dns_provider %q is not defined in the hub's config under dns_providers — add it there first", req.DNSProvider)
+	}
+
+	domainSet := make(map[string]bool, len(req.Domains))
+	for _, d := range req.Domains {
+		domainSet[d] = true
+	}
+	for domain, provider := range req.DomainDNSProviders {
+		if !domainSet[domain] {
+			return nil, fmt.Errorf("domain_dns_providers references domain %q, which is not in Domains", domain)
+		}
+		if _, ok := hubCfg.DNSProviders[provider]; !ok {
+			return nil, fmt.Errorf("domain_dns_providers[%s]: dns_provider %q is not defined in the hub's config under dns_providers — add it there first", domain, provider)
+		}
 	}
 
 	existing, spokeExists := hubCfg.Spokes[req.SpokeID]
@@ -132,6 +155,20 @@ func writeCertBlock(b *strings.Builder, req Request, indent string) {
 	fmt.Fprintf(b, "%s- name: %s\n", indent, req.CertName)
 	fmt.Fprintf(b, "%s  domains: [%s]\n", indent, strings.Join(req.Domains, ", "))
 	fmt.Fprintf(b, "%s  dns_provider: %s\n", indent, req.DNSProvider)
+	if len(req.DomainDNSProviders) > 0 {
+		// Sorted rather than range order, which Go randomizes per-run —
+		// this snippet gets pasted/logged/diffed by a human, and stable
+		// output matters more here than it would for machine-only YAML.
+		domains := make([]string, 0, len(req.DomainDNSProviders))
+		for d := range req.DomainDNSProviders {
+			domains = append(domains, d)
+		}
+		sort.Strings(domains)
+		fmt.Fprintf(b, "%s  domain_dns_providers:\n", indent)
+		for _, d := range domains {
+			fmt.Fprintf(b, "%s    %s: %s\n", indent, d, req.DomainDNSProviders[d])
+		}
+	}
 }
 
 // buildSpokeConfigYAML emits every certificate this spoke will manage, not
