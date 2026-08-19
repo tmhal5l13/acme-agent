@@ -1,5 +1,7 @@
 # acme-agent
 
+[![CI](https://github.com/tmhal5l13/acme-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/tmhal5l13/acme-agent/actions/workflows/ci.yml)
+
 A standalone, non-Kubernetes certificate-management system built around a
 **centralized renewal hub** — the same idea as cert-manager, for
 organizations that aren't running Kubernetes.
