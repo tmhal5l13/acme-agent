@@ -519,6 +519,12 @@ real DNS-01 challenges to Pebble, proving the entire spoke↔hub↔CA pipeline
 end to end with no fakes anywhere in the chain, not just each half tested
 in isolation.
 
+**CI** (`.github/workflows/ci.yml`) runs the full non-Pebble suite
+(build/vet/gofmt/test/`-race`/`govulncheck`) on every push and pull request
+against `main`, plus a separate job that installs Pebble and
+`pebble-challtestsrv` and runs this Pebble-gated suite too — so none of
+this depends on a human remembering to run it locally before merging.
+
 ## Hub network hardening
 
 - **Request bodies are size-limited.** `handleCheckin` and both dns01

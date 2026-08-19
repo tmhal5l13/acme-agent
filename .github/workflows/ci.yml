@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build, vet, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "the following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test (race detector)
+        run: go test -race ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  e2e:
+    name: Pebble end-to-end ACME tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install pebble and pebble-challtestsrv
+        run: |
+          go install github.com/letsencrypt/pebble/v2/cmd/pebble@latest
+          go install github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # internal/acmeclient and internal/hubapi each launch their own pebble
+      # + pebble-challtestsrv subprocesses on fixed ports - -p 1 forces them
+      # to run one package's test binary at a time instead of go test's
+      # default per-package parallelism, or the two packages' pebble
+      # instances collide on the same ports. See pebble_test.go's doc
+      # comment in both packages for the full reasoning.
+      - name: Run Pebble e2e tests
+        env:
+          ACME_AGENT_E2E_TESTS: "1"
+        run: go test -p 1 ./internal/acmeclient/... ./internal/hubapi/... -run Pebble -v
