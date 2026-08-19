@@ -242,13 +242,22 @@ cross-compiling for another OS/architecture needs nothing beyond `GOOS`/
 ```
 GOOS=windows GOARCH=amd64 go build ./cmd/acme-hub
 GOOS=darwin  GOARCH=arm64 go build ./cmd/acme-hub   # Apple Silicon
-GOOS=darwin  GOARCH=amd64 go build ./cmd/acme-hub   # Intel
+GOOS=darwin  GOARCH=amd64 go build ./cmd/acme-hub   # Intel - unverified, see below
 ```
 
 The systemd deployment above (`deploy/`) is Linux-only and this project's
 only tested production target; Windows/macOS builds exist so the code
 *compiles* cleanly for anyone who wants to run a spoke there, not as a
 supported deployment path with its own install tooling.
+
+**Intel Mac (`darwin/amd64`) is explicitly deprioritized**, not actively
+verified: Apple has ended (or announced ending) Intel support, so it's not
+worth spending CI time or attention keeping this compiling as the codebase
+evolves. It's still plain Go with no known reason it wouldn't build — the
+command above should keep working — it's just not something a future
+change is guaranteed to preserve, and it's not in CI's `cross-compile`
+matrix below. Apple Silicon (`darwin/arm64`) is the macOS target that's
+actually kept working.
 
 Two real platform gaps to know about:
 
@@ -268,15 +277,17 @@ Two real platform gaps to know about:
   binary outright (not a dismissible Gatekeeper prompt — it won't launch).
   Run `codesign --sign - <binary>` (ad-hoc, no Apple Developer account
   needed) on the target Mac after transferring it. Intel Macs are more
-  lenient about unsigned binaries but that population is shrinking.
+  lenient about unsigned binaries, but see above — that target isn't
+  actively maintained anyway.
 
-CI's `cross-compile` job builds all three binaries for `windows/amd64`,
-`darwin/amd64`, and `darwin/arm64` on every push/PR — a `go build` check
-only, not a full test run (there's no Windows/macOS runner executing the
-test suite) — specifically so a future platform-incompatible call (like
-`syscall.Umask` was before `internal/umask` existed) fails CI immediately
-instead of only surfacing the next time someone happens to try a
-cross-compile by hand.
+CI's `cross-compile` job builds all three binaries for `windows/amd64` and
+`darwin/arm64` on every push/PR — a `go build` check only, not a full test
+run (there's no Windows/macOS runner executing the test suite) —
+specifically so a future platform-incompatible call (like `syscall.Umask`
+was before `internal/umask` existed) fails CI immediately instead of only
+surfacing the next time someone happens to try a cross-compile by hand.
+`darwin/amd64` is deliberately not in this matrix, per the Intel Mac note
+above.
 
 ## Onboarding a spoke
 
