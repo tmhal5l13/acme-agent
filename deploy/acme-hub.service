@@ -13,7 +13,7 @@ RestartSec=5s
 # alone (never reused across restarts or other services), no shell, no
 # home directory to manage manually. The hub never execs anything (unlike
 # the spoke's reload hook, which needs a stable, nameable user for its
-# sudoers rule - see acme-client.service), so it has no reason to need a
+# sudoers rule - see acme-spoke.service), so it has no reason to need a
 # real system user.
 DynamicUser=yes
 StateDirectory=acme-hub

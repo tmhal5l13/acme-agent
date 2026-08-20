@@ -77,7 +77,7 @@ func LoadSpokeConfig(path string) (*SpokeConfig, error) {
 
 func (c *SpokeConfig) applyDefaults() {
 	if c.DBPath == "" {
-		c.DBPath = filepath.Join(c.DataDir, "acme-client.db")
+		c.DBPath = filepath.Join(c.DataDir, "acme-spoke.db")
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = Duration(defaultPollInterval)

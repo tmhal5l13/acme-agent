@@ -12,8 +12,8 @@ func validSpokeConfig() *SpokeConfig {
 	return &SpokeConfig{
 		HubURL:         "https://192.0.2.10:8443",
 		HubToken:       "hub-token",
-		HubTLSCertFile: "/etc/acme-client/hub-cert.pem",
-		DataDir:        "/var/lib/acme-client",
+		HubTLSCertFile: "/etc/acme-spoke/hub-cert.pem",
+		DataDir:        "/var/lib/acme-spoke",
 		ACME:           ACMEConfig{Environment: "staging"},
 		Certs: []SpokeLocalCertConfig{
 			{Name: "radius-cert", Domains: []string{"radius.example.com"}},
@@ -121,8 +121,8 @@ func TestSpokeConfig_RejectsNegativePollInterval(t *testing.T) {
 	err := yaml.Unmarshal([]byte(`
 hub_url: "https://192.0.2.10:8443"
 hub_token: "hub-token"
-hub_tls_cert_file: /etc/acme-client/hub-cert.pem
-data_dir: /var/lib/acme-client
+hub_tls_cert_file: /etc/acme-spoke/hub-cert.pem
+data_dir: /var/lib/acme-spoke
 poll_interval: "-15m"
 `), &cfg)
 	if err == nil {

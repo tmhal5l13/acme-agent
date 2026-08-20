@@ -34,7 +34,7 @@ func validRequest() Request {
 		Domains:        []string{"new.example.com"},
 		DNSProvider:    "route53_main",
 		HubURL:         "https://192.0.2.10:8443",
-		HubTLSCertFile: "/etc/acme-client/hub-cert.pem",
+		HubTLSCertFile: "/etc/acme-spoke/hub-cert.pem",
 		ACMEEmail:      "admin@example.com",
 		ACMEEnv:        "staging",
 	}

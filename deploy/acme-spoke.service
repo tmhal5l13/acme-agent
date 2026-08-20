@@ -1,25 +1,25 @@
 [Unit]
-Description=acme-agent spoke client - ACME issuance and local install for this host
+Description=acme-agent spoke - ACME issuance and local install for this host
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/acme-client --config /etc/acme-client/config.yaml
+ExecStart=/usr/local/bin/acme-spoke --config /etc/acme-spoke/config.yaml
 Restart=on-failure
 RestartSec=5s
 
 # Unlike the hub, this needs a real, stable, nameable system user - the
 # reload hook (e.g. "sudo systemctl reload nginx") is authorized via a
 # sudoers rule scoped to a specific username, which DynamicUser's
-# per-start-random UID can't provide. See install-client.sh, which
-# creates this user, and acme-client.sudoers.example for the rule itself.
-User=acme-client
-Group=acme-client
-StateDirectory=acme-client
+# per-start-random UID can't provide. See install-spoke.sh, which
+# creates this user, and acme-spoke.sudoers.example for the rule itself.
+User=acme-spoke
+Group=acme-spoke
+StateDirectory=acme-spoke
 StateDirectoryMode=0750
 
-EnvironmentFile=/etc/acme-client/acme-client.env
+EnvironmentFile=/etc/acme-spoke/acme-spoke.env
 
 # Hardening - deliberately does NOT set NoNewPrivileges=yes. That flag
 # would prevent the reload_hook's "sudo ..." from actually gaining root:

@@ -120,11 +120,11 @@ changes yourself before pulling them into anything you run.
 
 ## Quick start
 
-Three binaries: the hub, the spoke client, and an onboarding helper.
+Three binaries: the hub, the spoke, and an onboarding helper.
 
 ```
 go build -o /tmp/acme-hub    ./cmd/acme-hub
-go build -o /tmp/acme-client ./cmd/acme-client
+go build -o /tmp/acme-spoke  ./cmd/acme-spoke
 go build -o /tmp/acme-onboard ./cmd/acme-onboard
 ```
 
@@ -137,7 +137,7 @@ production environment has real rate limits.
 
 ```
 /tmp/acme-hub --config hub-config.yaml &
-/tmp/acme-client --config spoke-config.yaml --once
+/tmp/acme-spoke --config spoke-config.yaml --once
 ```
 
 The hub self-signs its own TLS certificate on first startup and logs its
@@ -152,7 +152,7 @@ each long-running binary:
 
 ```
 sudo ./deploy/install-hub.sh      # on the hub host
-sudo ./deploy/install-client.sh   # on each spoke host
+sudo ./deploy/install-spoke.sh    # on each spoke host
 ```
 
 See `ARCHITECTURE.md` → "Production deployment (systemd)" for what these

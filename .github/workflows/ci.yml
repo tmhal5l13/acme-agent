@@ -100,5 +100,5 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           go build -o /dev/null ./cmd/acme-hub
-          go build -o /dev/null ./cmd/acme-client
+          go build -o /dev/null ./cmd/acme-spoke
           go build -o /dev/null ./cmd/acme-onboard

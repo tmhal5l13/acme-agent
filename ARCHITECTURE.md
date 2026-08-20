@@ -24,7 +24,7 @@ provider credentials never leave the hub**:
   spokes have (via their own reports), decides when each is due for
   renewal, and holds every DNS provider credential. It never holds a
   private key or a signed certificate.
-- **`cmd/acme-client`** (the "spoke") — runs on each host that actually
+- **`cmd/acme-spoke`** (the "spoke") — runs on each host that actually
   needs a certificate. Generates its own key, drives its own ACME order,
   installs the resulting certificate locally, and runs its own local
   reload hook (e.g. `systemctl reload nginx`).
@@ -178,13 +178,13 @@ exit, instead of the normal polling/serving loop):
 
 ```
 go build -o /tmp/acme-hub ./cmd/acme-hub
-go build -o /tmp/acme-client ./cmd/acme-client
+go build -o /tmp/acme-spoke ./cmd/acme-spoke
 
 /tmp/acme-hub --config hub-dev-config.yaml &
 # note the sha256_fingerprint the hub logs, then copy its cert for the spoke to pin:
 cp "$(yq '.data_dir' hub-dev-config.yaml)/tls/cert.pem" ./hub-cert.pem
 # set hub_tls_cert_file: ./hub-cert.pem in spoke-dev-config.yaml, then:
-/tmp/acme-client --config spoke-dev-config.yaml --once
+/tmp/acme-spoke --config spoke-dev-config.yaml --once
 ```
 
 Use `acme.environment: staging` in the spoke config while testing — Let's
@@ -194,11 +194,11 @@ Encrypt's production environment has real rate limits.
 
 `deploy/` has a unit file, install script, and config example for each
 binary — `acme-hub.service`/`install-hub.sh` and
-`acme-client.service`/`install-client.sh`. On the target host, after
+`acme-spoke.service`/`install-spoke.sh`. On the target host, after
 building the binary and copying it to `/usr/local/bin/`:
 
 ```
-sudo ./deploy/install-hub.sh      # or install-client.sh on a spoke
+sudo ./deploy/install-hub.sh      # or install-spoke.sh on a spoke
 ```
 
 The two binaries are hardened differently on purpose:
@@ -207,12 +207,12 @@ The two binaries are hardened differently on purpose:
   allocates just for it, with no stable username to manage. This is safe
   because the hub never execs anything else; it only makes outbound
   HTTP/DNS-provider-API calls and serves its own API.
-- **The spoke** runs as a real, stable system user (`acme-client`, created
-  by `install-client.sh`) instead, and does **not** set
+- **The spoke** runs as a real, stable system user (`acme-spoke`, created
+  by `install-spoke.sh`) instead, and does **not** set
   `NoNewPrivileges=yes` — because its reload hook typically runs
   `sudo systemctl reload ...`, and `NoNewPrivileges` would silently break
   `sudo`'s setuid-root re-exec, turning every reload into a no-op. The
-  trade-off is made up for by `acme-client.sudoers.example`: a narrowly
+  trade-off is made up for by `acme-spoke.sudoers.example`: a narrowly
   scoped sudoers rule authorizing exactly the reload command(s) this spoke
   needs, nothing broader.
 
@@ -228,7 +228,7 @@ not a sign of incompatibility), but apply correctly under the real
 root-managed system units these files describe.
 
 Secrets for both binaries live in an `EnvironmentFile` (`acme-hub.env` /
-`acme-client.env`, mode `0600`, root-owned) referenced from `config.yaml`
+`acme-spoke.env`, mode `0600`, root-owned) referenced from `config.yaml`
 via `${VAR}` — never written into `config.yaml` itself, which is why that
 file can safely stay world-readable (`0644`).
 
@@ -353,7 +353,7 @@ acme-onboard \
   --domains radius.example.com \
   --dns-provider route53_main \
   --hub-url https://192.0.2.10:8443 \
-  --hub-tls-cert-file /etc/acme-client/hub-cert.pem \
+  --hub-tls-cert-file /etc/acme-spoke/hub-cert.pem \
   --reload-hook "systemctl restart freeradius" \
   --acme-email admin@example.com \
   --acme-environment staging \
