@@ -1,4 +1,4 @@
-# cmd/acme-client config, for one spoke host. This binary generates its own
+# cmd/acme-spoke config, for one spoke host. This binary generates its own
 # key, drives its own ACME order, installs the resulting certificate
 # locally, and runs its own local reload hook — it never sends the hub a
 # private key, and never holds DNS provider credentials itself. See
@@ -14,7 +14,7 @@ hub_token: "${HUB_TOKEN}" # must match this spoke's token in the hub's config
 # against what the hub logged on its own startup before trusting it. Plain
 # `sha256sum` on this file will NOT match that fingerprint — it hashes the
 # raw PEM file bytes, not the parsed certificate, which is a different value.
-hub_tls_cert_file: /etc/acme-client/hub-cert.pem
+hub_tls_cert_file: /etc/acme-spoke/hub-cert.pem
 
 poll_interval: 15m
 request_timeout: 30s # bounds quick hub calls: due, checkin
@@ -44,7 +44,7 @@ acme:
   # spoke requests from that CA — a public CA's API endpoint is already
   # covered by the OS trust store; a private CA's usually isn't. Only
   # meaningful alongside directory_url.
-  # ca_cert_file: /etc/acme-client/private-ca.pem
+  # ca_cert_file: /etc/acme-spoke/private-ca.pem
 
   # Optional: External Account Binding (RFC 8555 §7.3.4), required by some
   # CAs — both private CA setups and some public ones (e.g. Google Trust
@@ -53,8 +53,8 @@ acme:
   # eab_key_id: "${ACME_EAB_KEY_ID}"
   # eab_hmac_key: "${ACME_EAB_HMAC_KEY}"
 
-data_dir: /var/lib/acme-client
-# db_path: /var/lib/acme-client/acme-client.db  # optional; defaults under data_dir
+data_dir: /var/lib/acme-spoke
+# db_path: /var/lib/acme-spoke/acme-spoke.db  # optional; defaults under data_dir
 
 # Each cert is installed under <data_dir>/certs/<name>/current/
 # {privkey.pem,cert.pem,fullchain.pem} — reload_hook (and whatever config

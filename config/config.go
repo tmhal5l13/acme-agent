@@ -1,6 +1,6 @@
 // Package config loads and validates acme-agent's YAML configuration files
-// for both binaries: the hub (cmd/acme-hub) and the spoke client
-// (cmd/acme-client).
+// for both binaries: the hub (cmd/acme-hub) and the spoke
+// (cmd/acme-spoke).
 package config
 
 import (

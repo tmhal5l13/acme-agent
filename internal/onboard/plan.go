@@ -191,7 +191,7 @@ func buildSpokeConfigYAML(req Request, existingCerts []config.SpokeCertConfig) s
 	fmt.Fprintf(&b, "acme:\n")
 	fmt.Fprintf(&b, "  environment: %s\n", req.ACMEEnv)
 	fmt.Fprintf(&b, "  email: %s\n\n", req.ACMEEmail)
-	fmt.Fprintf(&b, "data_dir: /var/lib/acme-client\n\n")
+	fmt.Fprintf(&b, "data_dir: /var/lib/acme-spoke\n\n")
 	fmt.Fprintf(&b, "certs:\n")
 	for _, c := range existingCerts {
 		fmt.Fprintf(&b, "  - name: %s\n", c.Name)

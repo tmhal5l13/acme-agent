@@ -29,7 +29,7 @@ func run() error {
 	domains := flag.String("domains", "", "comma-separated domains, e.g. radius.example.com or example.com,*.example.com")
 	dnsProvider := flag.String("dns-provider", "", "name of an entry already defined under the hub's dns_providers")
 	hubURL := flag.String("hub-url", "", "URL this spoke will use to reach the hub, e.g. https://192.0.2.10:8443")
-	hubTLSCertFile := flag.String("hub-tls-cert-file", "/etc/acme-client/hub-cert.pem", "local path, on this new spoke, where you'll copy the hub's certificate to")
+	hubTLSCertFile := flag.String("hub-tls-cert-file", "/etc/acme-spoke/hub-cert.pem", "local path, on this new spoke, where you'll copy the hub's certificate to")
 	reloadHook := flag.String("reload-hook", "", "optional local reload command, e.g. \"systemctl reload nginx\"")
 	acmeEmail := flag.String("acme-email", "", "ACME account email for this spoke")
 	acmeEnv := flag.String("acme-environment", "staging", "staging or production")
@@ -97,7 +97,7 @@ func run() error {
 	}
 	fmt.Println()
 
-	fmt.Println("=== Add to this spoke's acme-client.env ===")
+	fmt.Println("=== Add to this spoke's acme-spoke.env ===")
 	fmt.Printf("HUB_TOKEN=%s\n", result.Token)
 
 	return nil

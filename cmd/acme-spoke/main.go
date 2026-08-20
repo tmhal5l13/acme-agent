@@ -1,4 +1,4 @@
-// Command acme-client is the spoke agent: it generates its own key, drives
+// Command acme-spoke is the spoke agent: it generates its own key, drives
 // its own ACME order, installs the resulting certificate locally, and runs
 // its own local reload hook. It polls the hub for renewal instructions and
 // relays DNS-01 challenges through it, but never sends the hub a private
@@ -24,7 +24,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("acme-client exiting", "error", err)
+		slog.Error("acme-spoke exiting", "error", err)
 		os.Exit(1)
 	}
 }
