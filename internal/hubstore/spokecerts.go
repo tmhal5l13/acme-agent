@@ -1,6 +1,7 @@
 package hubstore
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 
@@ -123,9 +124,23 @@ func (s *Store) RemoveSpokeCert(spokeID, certName string) error {
 // the shared query AllSpokes (spokes.go) and RemoveDNSProvider's in-use
 // check (dnsproviders.go) both need.
 func (s *Store) allSpokeCerts() (map[string][]config.SpokeCertConfig, error) {
-	rows, err := s.db.Query(`SELECT spoke_id, name, domains_json, dns_provider, domain_dns_providers_json, renew_before_ns FROM spoke_certs`)
+	return scanSpokeCerts(s.db.Query(`SELECT spoke_id, name, domains_json, dns_provider, domain_dns_providers_json, renew_before_ns FROM spoke_certs`))
+}
+
+// spokeCerts returns one spoke's certificates - GetSpoke's (spokes.go)
+// single-spoke counterpart to allSpokeCerts.
+func (s *Store) spokeCerts(spokeID string) ([]config.SpokeCertConfig, error) {
+	byspoke, err := scanSpokeCerts(s.db.Query(
+		`SELECT spoke_id, name, domains_json, dns_provider, domain_dns_providers_json, renew_before_ns FROM spoke_certs WHERE spoke_id = ?`, spokeID))
 	if err != nil {
-		return nil, fmt.Errorf("query all spoke certs: %w", err)
+		return nil, err
+	}
+	return byspoke[spokeID], nil
+}
+
+func scanSpokeCerts(rows *sql.Rows, queryErr error) (map[string][]config.SpokeCertConfig, error) {
+	if queryErr != nil {
+		return nil, fmt.Errorf("query spoke certs: %w", queryErr)
 	}
 	defer rows.Close()
 

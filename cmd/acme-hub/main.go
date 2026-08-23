@@ -48,6 +48,8 @@ func run() error {
 	gtHubURL := flag.String("hub-url", "", "(-generate-token) URL the new spoke will dial to reach this hub; defaults to https://<tls_host or listen_addr host>:<listen_addr port>")
 	gtTokenTTL := flag.Duration("token-ttl", time.Hour, "(-generate-token) how long the printed enrollment token stays valid")
 
+	importConfig := flag.String("import-config", "", "one-shot migration: import spokes:/dns_providers: from a pre-cutover config file at this path into the database, then exit - see ARCHITECTURE.md \"Database-backed desired state\"")
+
 	flag.Parse()
 
 	umask.Restrict()
@@ -67,6 +69,10 @@ func run() error {
 			HubURL:             *gtHubURL,
 			TTL:                *gtTokenTTL,
 		})
+	}
+
+	if *importConfig != "" {
+		return runImportConfig(cfg, *importConfig)
 	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
@@ -172,19 +178,13 @@ type generateTokenArgs struct {
 	TTL                time.Duration
 }
 
-// runGenerateToken is -generate-token's entire job: validate args against
-// the hub's current config (via onboard.PlanEnrollment), mint and store a
-// one-time enrollment secret, and print everything the operator needs -
-// the hub-config snippet to paste (same shape acme-onboard already
-// produces for a brand-new spoke), and one opaque token string to hand to
-// the new spoke for `acme-spoke --load-token`. See ARCHITECTURE.md "Spoke
-// enrollment" for the full workflow this is one step of.
-//
-// Deliberately does not touch config.yaml itself - same reasoning
-// internal/onboard has always used: programmatically editing a
-// hand-authored, commented YAML file risks mangling it in a way a human
-// wouldn't. The operator still pastes the snippet by hand, then reloads
-// the hub with SIGHUP (not a restart - see "Config hot-reload").
+// runGenerateToken is -generate-token's entire job: validate args and
+// write the new spoke, its bearer token, and its one certificate directly
+// into the hub's database (via onboard.PlanEnrollment), mint and store a
+// one-time enrollment secret, and print the one opaque token string to
+// hand to the new spoke for `acme-spoke --load-token`. See
+// ARCHITECTURE.md "Spoke enrollment" for the full workflow this is one
+// step of.
 func runGenerateToken(cfg *config.HubConfig, args generateTokenArgs) error {
 	if args.SpokeID == "" || args.CertName == "" || args.Domains == "" || args.DNSProvider == "" {
 		return fmt.Errorf("-generate-token requires -spoke-id, -cert-name, -domains, and -dns-provider")
@@ -204,18 +204,6 @@ func runGenerateToken(cfg *config.HubConfig, args generateTokenArgs) error {
 		return fmt.Errorf("parse -domain-dns-providers: %w", err)
 	}
 
-	plan, err := onboard.PlanEnrollment(cfg, onboard.EnrollmentRequest{
-		SpokeID:            args.SpokeID,
-		CertName:           args.CertName,
-		Domains:            strings.Split(args.Domains, ","),
-		DNSProvider:        args.DNSProvider,
-		DomainDNSProviders: domainDNSProviders,
-		HubURL:             hubURL,
-	})
-	if err != nil {
-		return fmt.Errorf("plan enrollment: %w", err)
-	}
-
 	// Idempotent (EnsureCert never touches an existing cert/key pair), so
 	// safe to call here even if the hub daemon has never actually been
 	// started yet - the fingerprint below needs a real certificate to
@@ -233,6 +221,19 @@ func runGenerateToken(cfg *config.HubConfig, args generateTokenArgs) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
+
+	plan, err := onboard.PlanEnrollment(st, onboard.EnrollmentRequest{
+		SpokeID:            args.SpokeID,
+		CertName:           args.CertName,
+		Domains:            strings.Split(args.Domains, ","),
+		DNSProvider:        args.DNSProvider,
+		DomainDNSProviders: domainDNSProviders,
+		HubURL:             hubURL,
+	})
+	if err != nil {
+		return fmt.Errorf("plan enrollment: %w", err)
+	}
+
 	if err := st.InsertEnrollmentToken(plan.EnrollmentSecret, args.SpokeID, plan.BearerToken, time.Now().Add(args.TTL)); err != nil {
 		return fmt.Errorf("insert enrollment token: %w", err)
 	}
@@ -242,15 +243,67 @@ func runGenerateToken(cfg *config.HubConfig, args generateTokenArgs) error {
 		return fmt.Errorf("encode enrollment token: %w", err)
 	}
 
-	fmt.Println("=== Add this to the hub's config.yaml under spokes: ===")
-	fmt.Print(plan.HubConfigYAML)
-	fmt.Println()
-	fmt.Printf("=== Add to the hub's env file ===\n%s=%s\n\n", plan.HubEnvVarName, plan.BearerToken)
-	fmt.Println("Then reload the hub - no restart needed:")
+	fmt.Printf("Created spoke %q on the hub. This takes effect the next time the hub reloads:\n", args.SpokeID)
 	fmt.Println("  systemctl reload acme-hub   # or: kill -HUP $(pidof acme-hub)")
 	fmt.Println()
 	fmt.Printf("On the new spoke, valid for %s:\n", args.TTL)
 	fmt.Printf("  acme-spoke --load-token %s\n", token)
+
+	return nil
+}
+
+// runImportConfig is -import-config's entire job: read a pre-cutover
+// config file's spokes:/dns_providers: sections (via
+// config.LoadLegacyDesiredState - a separate file from *configPath, which
+// still holds this run's own listen_addr/data_dir/etc.) and write every
+// DNS provider and spoke straight into cfg's database, through the exact
+// same hubstore methods the web admin UI and acme-onboard use - imported
+// data ends up indistinguishable from data created either of those ways.
+// A one-shot operation: run it once per legacy file, then reload or
+// restart the hub normally.
+//
+// DNS providers are imported before spokes, since UpsertSpokeCert
+// validates that every cert's dns_provider (and any domain_dns_providers
+// override) already exists.
+func runImportConfig(cfg *config.HubConfig, legacyPath string) error {
+	legacy, err := config.LoadLegacyDesiredState(legacyPath)
+	if err != nil {
+		return fmt.Errorf("load legacy config %s: %w", legacyPath, err)
+	}
+
+	st, err := hubstore.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	for name, providerCfg := range legacy.DNSProviders {
+		if err := st.UpsertDNSProvider(name, providerCfg); err != nil {
+			return fmt.Errorf("import dns provider %q: %w", name, err)
+		}
+		fmt.Printf("imported dns provider %q\n", name)
+	}
+
+	for spokeID, spoke := range legacy.Spokes {
+		if err := st.CreateSpoke(spokeID, spoke.Tokens[0]); err != nil {
+			return fmt.Errorf("import spoke %q: %w", spokeID, err)
+		}
+		for _, token := range spoke.Tokens[1:] {
+			if err := st.AddSpokeToken(spokeID, token); err != nil {
+				return fmt.Errorf("import spoke %q: add token: %w", spokeID, err)
+			}
+		}
+		for _, cert := range spoke.Certs {
+			if err := st.UpsertSpokeCert(spokeID, cert); err != nil {
+				return fmt.Errorf("import spoke %q cert %q: %w", spokeID, cert.Name, err)
+			}
+		}
+		fmt.Printf("imported spoke %q (%d token(s), %d cert(s))\n", spokeID, len(spoke.Tokens), len(spoke.Certs))
+	}
+
+	fmt.Println()
+	fmt.Println("Import complete. Remove spokes:/dns_providers: from", legacyPath, "(or stop using that file),")
+	fmt.Println("then reload or restart the hub normally.")
 
 	return nil
 }

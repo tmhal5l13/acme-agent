@@ -274,10 +274,22 @@ func testGenerateTokenConfig(dir string) *config.HubConfig {
 		DBPath:      filepath.Join(dir, "test.db"),
 		TLSCertFile: filepath.Join(dir, "cert.pem"),
 		TLSKeyFile:  filepath.Join(dir, "key.pem"),
-		DNSProviders: map[string]config.DNSProviderConfig{
-			"route53_main": {Type: "route53"},
-		},
-		Spokes: map[string]config.SpokeEntry{},
+	}
+}
+
+// seedRoute53Main opens cfg.DBPath's database (the same one runGenerateToken
+// itself will open) and creates a route53_main DNS provider - runGenerateToken
+// now validates dns_provider against the database, not cfg, so tests that
+// need it to exist have to seed it there first.
+func seedRoute53Main(t *testing.T, cfg *config.HubConfig) {
+	t.Helper()
+	st, err := hubstore.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open store to seed dns provider: %v", err)
+	}
+	defer st.Close()
+	if err := st.UpsertDNSProvider("route53_main", config.DNSProviderConfig{Type: "route53"}); err != nil {
+		t.Fatalf("seed route53_main: %v", err)
 	}
 }
 
@@ -335,6 +347,7 @@ func captureStdout(t *testing.T, fn func()) string {
 func TestRunGenerateToken_PrintedTokenIsGenuinelyRedeemable(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testGenerateTokenConfig(dir)
+	seedRoute53Main(t, cfg)
 	args := generateTokenArgs{
 		SpokeID:     "radius-spoke",
 		CertName:    "radius-cert",

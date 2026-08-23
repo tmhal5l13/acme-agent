@@ -7,24 +7,33 @@ import (
 	"testing"
 
 	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
 
-func testHubConfig() *config.HubConfig {
-	return &config.HubConfig{
-		ListenAddr: "127.0.0.1:8443",
-		DataDir:    "/var/lib/acme-hub",
-		DNSProviders: map[string]config.DNSProviderConfig{
-			"route53_main": {Type: "route53"},
-		},
-		Spokes: map[string]config.SpokeEntry{
-			"existing-spoke": {
-				Tokens: []string{"existing-token-value"},
-				Certs: []config.SpokeCertConfig{
-					{Name: "existing-cert", Domains: []string{"old.example.com"}, DNSProvider: "route53_main"},
-				},
-			},
-		},
+// testStore returns a real temp-file hubstore.Store seeded with one DNS
+// provider (route53_main) and one existing spoke (existing-spoke, token
+// existing-token-value, one cert existing-cert/old.example.com) - the
+// database-backed equivalent of the old testHubConfig() fixture.
+func testStore(t *testing.T) *hubstore.Store {
+	t.Helper()
+	st, err := hubstore.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { st.Close() })
+
+	if err := st.UpsertDNSProvider("route53_main", config.DNSProviderConfig{Type: "route53"}); err != nil {
+		t.Fatalf("seed dns provider: %v", err)
+	}
+	if err := st.CreateSpoke("existing-spoke", "existing-token-value"); err != nil {
+		t.Fatalf("seed existing spoke: %v", err)
+	}
+	if err := st.UpsertSpokeCert("existing-spoke", config.SpokeCertConfig{
+		Name: "existing-cert", Domains: []string{"old.example.com"}, DNSProvider: "route53_main",
+	}); err != nil {
+		t.Fatalf("seed existing cert: %v", err)
+	}
+	return st
 }
 
 func validRequest() Request {
@@ -40,36 +49,54 @@ func validRequest() Request {
 	}
 }
 
-func TestPlan_NewSpokeGeneratesFreshToken(t *testing.T) {
-	result, err := Plan(testHubConfig(), validRequest())
+func TestPlan_NewSpokeCreatesSpokeAndCert(t *testing.T) {
+	st := testStore(t)
+	result, err := Plan(st, validRequest())
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
 	if !result.IsNewSpoke {
-		t.Error("got IsNewSpoke=false for a spoke not present in the hub config, want true")
+		t.Error("got IsNewSpoke=false for a spoke that didn't exist yet, want true")
 	}
 	if len(result.Token) != 64 { // 32 bytes hex-encoded
 		t.Errorf("got token length %d, want 64", len(result.Token))
 	}
-	if result.HubEnvVarName != "SPOKE_NEW_SPOKE_TOKEN" {
-		t.Errorf("got env var name %q, want %q", result.HubEnvVarName, "SPOKE_NEW_SPOKE_TOKEN")
+
+	got, err := st.GetSpoke("new-spoke")
+	if err != nil {
+		t.Fatalf("GetSpoke after Plan: %v", err)
+	}
+	if len(got.Tokens) != 1 || got.Tokens[0] != result.Token {
+		t.Errorf("got tokens %v, want exactly the returned token", got.Tokens)
+	}
+	if len(got.Certs) != 1 || got.Certs[0].Name != "new-cert" {
+		t.Errorf("got certs %+v, want one new-cert", got.Certs)
 	}
 }
 
 func TestPlan_ExistingSpokeReusesToken(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.SpokeID = "existing-spoke"
 	req.CertName = "second-cert" // different from the existing cert on this spoke
 
-	result, err := Plan(testHubConfig(), req)
+	result, err := Plan(st, req)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
 	if result.IsNewSpoke {
-		t.Error("got IsNewSpoke=true for a spoke already present in the hub config, want false")
+		t.Error("got IsNewSpoke=true for a spoke that already existed, want false")
 	}
 	if result.Token != "existing-token-value" {
 		t.Errorf("got token %q, want the existing spoke's unchanged token %q", result.Token, "existing-token-value")
+	}
+
+	got, err := st.GetSpoke("existing-spoke")
+	if err != nil {
+		t.Fatalf("GetSpoke after Plan: %v", err)
+	}
+	if len(got.Certs) != 2 {
+		t.Errorf("got %d certs, want 2 (the pre-existing one plus the new one)", len(got.Certs))
 	}
 }
 
@@ -78,12 +105,13 @@ func TestPlan_ExistingSpokeReusesToken(t *testing.T) {
 // certificates — SpokeConfigYAML must list every cert the spoke manages,
 // not just the one being added in this call.
 func TestPlan_ExistingSpokeSpokeConfigIncludesAllCerts(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.SpokeID = "existing-spoke"
 	req.CertName = "second-cert"
 	req.Domains = []string{"new.example.com"}
 
-	result, err := Plan(testHubConfig(), req)
+	result, err := Plan(st, req)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
@@ -103,37 +131,41 @@ func TestPlan_ExistingSpokeSpokeConfigIncludesAllCerts(t *testing.T) {
 }
 
 func TestPlan_DuplicateCertNameOnExistingSpokeErrors(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.SpokeID = "existing-spoke"
 	req.CertName = "existing-cert" // already present on this spoke
 
-	_, err := Plan(testHubConfig(), req)
+	_, err := Plan(st, req)
 	if err == nil {
 		t.Fatal("expected an error for a duplicate cert name on an existing spoke, got nil")
 	}
 }
 
-func TestPlan_UnknownDNSProviderErrors(t *testing.T) {
+func TestPlan_RejectsUnknownDNSProvider(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.DNSProvider = "does-not-exist"
 
-	_, err := Plan(testHubConfig(), req)
+	_, err := Plan(st, req)
 	if err == nil {
-		t.Fatal("expected an error for a dns_provider not defined in the hub config, got nil")
+		t.Fatal("expected an error for a dns_provider that doesn't exist on the hub, got nil")
 	}
 }
 
 func TestPlan_InvalidACMEEnvironmentErrors(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.ACMEEnv = "not-a-real-environment"
 
-	_, err := Plan(testHubConfig(), req)
+	_, err := Plan(st, req)
 	if err == nil {
 		t.Fatal("expected an error for an invalid acme environment, got nil")
 	}
 }
 
 func TestPlan_MissingRequiredFieldsError(t *testing.T) {
+	st := testStore(t)
 	base := validRequest()
 	cases := []struct {
 		name   string
@@ -149,7 +181,7 @@ func TestPlan_MissingRequiredFieldsError(t *testing.T) {
 	for _, c := range cases {
 		req := base
 		c.mutate(&req)
-		if _, err := Plan(testHubConfig(), req); err == nil {
+		if _, err := Plan(st, req); err == nil {
 			t.Errorf("missing %s: expected an error, got nil", c.name)
 		}
 	}
@@ -161,10 +193,11 @@ func TestPlan_MissingRequiredFieldsError(t *testing.T) {
 // output is genuinely valid, working configuration, not just text that
 // happens to resemble it.
 func TestPlan_GeneratedSpokeConfigActuallyLoads(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.ReloadHook = "systemctl reload nginx"
 
-	result, err := Plan(testHubConfig(), req)
+	result, err := Plan(st, req)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
@@ -195,59 +228,52 @@ func TestPlan_GeneratedSpokeConfigActuallyLoads(t *testing.T) {
 	}
 }
 
-func TestPlan_HubConfigYAMLContainsExpectedFields(t *testing.T) {
-	result, err := Plan(testHubConfig(), validRequest())
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
+// TestPlan_DomainDNSProvidersOverrideIsStored proves a request spanning
+// two DNS providers actually persists a usable domain_dns_providers
+// assignment - see config.SpokeCertConfig.DomainDNSProviders for why one
+// cert's domains can need this at all.
+func TestPlan_DomainDNSProvidersOverrideIsStored(t *testing.T) {
+	st := testStore(t)
+	if err := st.UpsertDNSProvider("cloudflare_main", config.DNSProviderConfig{Type: "cloudflare"}); err != nil {
+		t.Fatalf("seed cloudflare_main: %v", err)
 	}
-	for _, want := range []string{"new-spoke", "new-cert", "new.example.com", "route53_main", "SPOKE_NEW_SPOKE_TOKEN"} {
-		if !strings.Contains(result.HubConfigYAML, want) {
-			t.Errorf("hub config YAML missing %q:\n%s", want, result.HubConfigYAML)
-		}
-	}
-}
-
-// TestPlan_DomainDNSProvidersOverrideAppearsInSnippet proves a request
-// spanning two DNS providers actually produces a usable domain_dns_providers
-// block in the generated hub config snippet - see
-// config.SpokeCertConfig.DomainDNSProviders for why one cert's domains can
-// need this at all.
-func TestPlan_DomainDNSProvidersOverrideAppearsInSnippet(t *testing.T) {
-	cfg := testHubConfig()
-	cfg.DNSProviders["cloudflare_main"] = config.DNSProviderConfig{Type: "cloudflare"}
 
 	req := validRequest()
 	req.Domains = []string{"new.example.com", "new.example.org"}
 	req.DomainDNSProviders = map[string]string{"new.example.org": "cloudflare_main"}
 
-	result, err := Plan(cfg, req)
-	if err != nil {
+	if _, err := Plan(st, req); err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	for _, want := range []string{"domain_dns_providers:", "new.example.org: cloudflare_main"} {
-		if !strings.Contains(result.HubConfigYAML, want) {
-			t.Errorf("hub config YAML missing %q:\n%s", want, result.HubConfigYAML)
-		}
+
+	got, err := st.GetSpoke("new-spoke")
+	if err != nil {
+		t.Fatalf("GetSpoke: %v", err)
+	}
+	if len(got.Certs) != 1 || got.Certs[0].DomainDNSProviders["new.example.org"] != "cloudflare_main" {
+		t.Errorf("got certs %+v, want the domain_dns_providers override to have persisted", got.Certs)
 	}
 }
 
 func TestPlan_DomainDNSProvidersRejectsDomainNotInRequest(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	// req.Domains is ["new.example.com"] - this override references a
 	// domain that was never added to the request, almost certainly a typo.
 	req.DomainDNSProviders = map[string]string{"other.example.org": req.DNSProvider}
 
-	_, err := Plan(testHubConfig(), req)
+	_, err := Plan(st, req)
 	if err == nil {
 		t.Fatal("expected an error for domain_dns_providers referencing a domain not in Domains, got nil")
 	}
 }
 
 func TestPlan_DomainDNSProvidersRejectsUnknownProvider(t *testing.T) {
+	st := testStore(t)
 	req := validRequest()
 	req.DomainDNSProviders = map[string]string{req.Domains[0]: "does-not-exist"}
 
-	_, err := Plan(testHubConfig(), req)
+	_, err := Plan(st, req)
 	if err == nil {
 		t.Fatal("expected an error for domain_dns_providers referencing an undefined dns_provider, got nil")
 	}
@@ -264,7 +290,8 @@ func validEnrollmentRequest() EnrollmentRequest {
 }
 
 func TestPlanEnrollment_ValidRequestSucceeds(t *testing.T) {
-	plan, err := PlanEnrollment(testHubConfig(), validEnrollmentRequest())
+	st := testStore(t)
+	plan, err := PlanEnrollment(st, validEnrollmentRequest())
 	if err != nil {
 		t.Fatalf("PlanEnrollment: %v", err)
 	}
@@ -277,13 +304,16 @@ func TestPlanEnrollment_ValidRequestSucceeds(t *testing.T) {
 	if plan.BearerToken == plan.EnrollmentSecret {
 		t.Error("got identical bearer token and enrollment secret, want two independently generated values")
 	}
-	if plan.HubEnvVarName != "SPOKE_NEW_SPOKE_TOKEN" {
-		t.Errorf("got env var name %q, want SPOKE_NEW_SPOKE_TOKEN", plan.HubEnvVarName)
+
+	got, err := st.GetSpoke("new-spoke")
+	if err != nil {
+		t.Fatalf("GetSpoke after PlanEnrollment: %v", err)
 	}
-	for _, want := range []string{"new-spoke", "new-cert", "new.example.com", "route53_main", "SPOKE_NEW_SPOKE_TOKEN"} {
-		if !strings.Contains(plan.HubConfigYAML, want) {
-			t.Errorf("hub config YAML missing %q:\n%s", want, plan.HubConfigYAML)
-		}
+	if len(got.Tokens) != 1 || got.Tokens[0] != plan.BearerToken {
+		t.Errorf("got tokens %v, want exactly the returned bearer token", got.Tokens)
+	}
+	if len(got.Certs) != 1 || got.Certs[0].Name != "new-cert" {
+		t.Errorf("got certs %+v, want one new-cert", got.Certs)
 	}
 }
 
@@ -292,26 +322,29 @@ func TestPlanEnrollment_ValidRequestSucceeds(t *testing.T) {
 // spoke isn't this function's job at all, not even to reuse its existing
 // token the way Plan does for an additional certificate.
 func TestPlanEnrollment_ExistingSpokeErrors(t *testing.T) {
+	st := testStore(t)
 	req := validEnrollmentRequest()
 	req.SpokeID = "existing-spoke"
 
-	_, err := PlanEnrollment(testHubConfig(), req)
+	_, err := PlanEnrollment(st, req)
 	if err == nil {
-		t.Fatal("expected an error enrolling a spoke that already exists in the hub config, got nil")
+		t.Fatal("expected an error enrolling a spoke that already exists, got nil")
 	}
 }
 
 func TestPlanEnrollment_UnknownDNSProviderErrors(t *testing.T) {
+	st := testStore(t)
 	req := validEnrollmentRequest()
 	req.DNSProvider = "does-not-exist"
 
-	_, err := PlanEnrollment(testHubConfig(), req)
+	_, err := PlanEnrollment(st, req)
 	if err == nil {
-		t.Fatal("expected an error for a dns_provider not defined in the hub config, got nil")
+		t.Fatal("expected an error for a dns_provider that doesn't exist on the hub, got nil")
 	}
 }
 
 func TestPlanEnrollment_MissingRequiredFieldsError(t *testing.T) {
+	st := testStore(t)
 	base := validEnrollmentRequest()
 	cases := []struct {
 		name   string
@@ -326,17 +359,18 @@ func TestPlanEnrollment_MissingRequiredFieldsError(t *testing.T) {
 	for _, c := range cases {
 		req := base
 		c.mutate(&req)
-		if _, err := PlanEnrollment(testHubConfig(), req); err == nil {
+		if _, err := PlanEnrollment(st, req); err == nil {
 			t.Errorf("missing %s: expected an error, got nil", c.name)
 		}
 	}
 }
 
 func TestPlanEnrollment_DomainDNSProvidersRejectsDomainNotInRequest(t *testing.T) {
+	st := testStore(t)
 	req := validEnrollmentRequest()
 	req.DomainDNSProviders = map[string]string{"other.example.org": "route53_main"}
 
-	_, err := PlanEnrollment(testHubConfig(), req)
+	_, err := PlanEnrollment(st, req)
 	if err == nil {
 		t.Fatal("expected an error for domain_dns_providers referencing a domain not in Domains, got nil")
 	}
@@ -347,44 +381,48 @@ func TestPlanEnrollment_DomainDNSProvidersRejectsDomainNotInRequest(t *testing.T
 // bearer token and the enrollment secret, or generating either
 // non-randomly.
 func TestPlanEnrollment_SuccessiveCallsGenerateDistinctTokens(t *testing.T) {
-	first, err := PlanEnrollment(testHubConfig(), validEnrollmentRequest())
+	st := testStore(t)
+	first, err := PlanEnrollment(st, validEnrollmentRequest())
 	if err != nil {
 		t.Fatalf("first PlanEnrollment: %v", err)
 	}
-	second, err := PlanEnrollment(testHubConfig(), validEnrollmentRequest())
+	second := validEnrollmentRequest()
+	second.SpokeID = "new-spoke-2"
+	secondPlan, err := PlanEnrollment(st, second)
 	if err != nil {
 		t.Fatalf("second PlanEnrollment: %v", err)
 	}
-	if first.BearerToken == second.BearerToken {
+	if first.BearerToken == secondPlan.BearerToken {
 		t.Error("two successive calls generated the identical bearer token")
 	}
-	if first.EnrollmentSecret == second.EnrollmentSecret {
+	if first.EnrollmentSecret == secondPlan.EnrollmentSecret {
 		t.Error("two successive calls generated the identical enrollment secret")
 	}
 }
 
 func TestPlanRotation_UnknownSpokeErrors(t *testing.T) {
-	_, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "no-such-spoke"})
+	st := testStore(t)
+	_, err := PlanRotation(st, RotationRequest{SpokeID: "no-such-spoke"})
 	if err == nil {
-		t.Fatal("expected an error for a spoke not defined in the hub config, got nil")
+		t.Fatal("expected an error for a spoke that doesn't exist, got nil")
 	}
 }
 
 func TestPlanRotation_MissingSpokeIDErrors(t *testing.T) {
-	_, err := PlanRotation(testHubConfig(), RotationRequest{})
+	st := testStore(t)
+	_, err := PlanRotation(st, RotationRequest{})
 	if err == nil {
 		t.Fatal("expected an error for an empty spoke id, got nil")
 	}
 }
 
-// TestPlanRotation_GeneratesFreshTokenAndDistinctEnvVar proves the two
-// properties PlanRotation actually needs to guarantee: the new token is a
-// real, freshly generated credential (not a copy of anything already on
-// the spoke), and its ${VAR} name doesn't collide with the existing
-// token's env var name — see PlanRotation's doc comment on why a plain
-// envVarName(spokeID) would be wrong here.
-func TestPlanRotation_GeneratesFreshTokenAndDistinctEnvVar(t *testing.T) {
-	result, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+// TestPlanRotation_AddsTokenWithoutTouchingExisting proves PlanRotation's
+// actual guarantee: a real, freshly generated token is added alongside
+// the spoke's existing one - not a copy of anything already on the spoke,
+// and not a replacement for it either.
+func TestPlanRotation_AddsTokenWithoutTouchingExisting(t *testing.T) {
+	st := testStore(t)
+	result, err := PlanRotation(st, RotationRequest{SpokeID: "existing-spoke"})
 	if err != nil {
 		t.Fatalf("PlanRotation: %v", err)
 	}
@@ -396,45 +434,36 @@ func TestPlanRotation_GeneratesFreshTokenAndDistinctEnvVar(t *testing.T) {
 		t.Error("got the spoke's existing token back, want a freshly generated one")
 	}
 
-	wantPrefix := "SPOKE_EXISTING_SPOKE_TOKEN_"
-	if !strings.HasPrefix(result.HubEnvVarName, wantPrefix) {
-		t.Errorf("got env var name %q, want it to start with %q", result.HubEnvVarName, wantPrefix)
-	}
-	if result.HubEnvVarName == "SPOKE_EXISTING_SPOKE_TOKEN" {
-		t.Error("got the same env var name a fresh onboard would use, want one that can't collide with the existing token's env var")
-	}
-}
-
-// TestPlanRotation_DoesNotLeakExistingToken guards the specific security
-// property in PlanRotation's doc comment: the generated snippet must
-// never contain the spoke's actual existing secret value, only
-// instructions describing what to add.
-func TestPlanRotation_DoesNotLeakExistingToken(t *testing.T) {
-	result, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+	got, err := st.GetSpoke("existing-spoke")
 	if err != nil {
-		t.Fatalf("PlanRotation: %v", err)
+		t.Fatalf("GetSpoke after PlanRotation: %v", err)
 	}
-	if strings.Contains(result.HubConfigYAML, "existing-token-value") {
-		t.Error("HubConfigYAML leaks the spoke's existing token value, want only instructions to add the new one")
+	if len(got.Tokens) != 2 {
+		t.Fatalf("got %d tokens, want 2 (existing plus rotated)", len(got.Tokens))
+	}
+	byToken := map[string]bool{got.Tokens[0]: true, got.Tokens[1]: true}
+	if !byToken["existing-token-value"] {
+		t.Error("existing-token-value is gone - PlanRotation must not remove the old token, only add a new one")
+	}
+	if !byToken[result.NewToken] {
+		t.Error("the new token was not actually persisted")
 	}
 }
 
-// TestPlanRotation_SuccessiveCallsGenerateDistinctTokensAndEnvVars proves
-// calling PlanRotation twice in a row (e.g. an operator retrying) doesn't
-// hand back the same token or env var name each time.
-func TestPlanRotation_SuccessiveCallsGenerateDistinctTokensAndEnvVars(t *testing.T) {
-	first, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+// TestPlanRotation_SuccessiveCallsGenerateDistinctTokens proves calling
+// PlanRotation twice in a row (e.g. an operator retrying) doesn't hand
+// back the same token each time.
+func TestPlanRotation_SuccessiveCallsGenerateDistinctTokens(t *testing.T) {
+	st := testStore(t)
+	first, err := PlanRotation(st, RotationRequest{SpokeID: "existing-spoke"})
 	if err != nil {
 		t.Fatalf("first PlanRotation: %v", err)
 	}
-	second, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "existing-spoke"})
+	second, err := PlanRotation(st, RotationRequest{SpokeID: "existing-spoke"})
 	if err != nil {
 		t.Fatalf("second PlanRotation: %v", err)
 	}
 	if first.NewToken == second.NewToken {
 		t.Error("two successive calls generated the identical token")
-	}
-	if first.HubEnvVarName == second.HubEnvVarName {
-		t.Error("two successive calls generated the identical env var name")
 	}
 }

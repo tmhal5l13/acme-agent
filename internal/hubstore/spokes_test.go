@@ -30,6 +30,48 @@ func TestCreateSpoke_CreatesSpokeAndToken(t *testing.T) {
 	}
 }
 
+func TestGetSpoke_UnknownSpokeReturnsErrNotFound(t *testing.T) {
+	st := openTestStore(t)
+	if _, err := st.GetSpoke("no-such-spoke"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetSpoke_ReturnsTokensAndCerts(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.UpsertDNSProvider("provider-a", providerCfgFixture()); err != nil {
+		t.Fatalf("UpsertDNSProvider: %v", err)
+	}
+	if err := st.CreateSpoke("spoke-a", "token-a"); err != nil {
+		t.Fatalf("CreateSpoke: %v", err)
+	}
+	if err := st.AddSpokeToken("spoke-a", "token-a2"); err != nil {
+		t.Fatalf("AddSpokeToken: %v", err)
+	}
+	if err := st.UpsertSpokeCert("spoke-a", certFixture("cert-a", "provider-a")); err != nil {
+		t.Fatalf("UpsertSpokeCert: %v", err)
+	}
+	// A second spoke exists too, to prove GetSpoke returns only spoke-a's
+	// own data, not everything in the database.
+	if err := st.CreateSpoke("spoke-b", "token-b"); err != nil {
+		t.Fatalf("CreateSpoke spoke-b: %v", err)
+	}
+
+	got, err := st.GetSpoke("spoke-a")
+	if err != nil {
+		t.Fatalf("GetSpoke: %v", err)
+	}
+	if got.ID != "spoke-a" {
+		t.Errorf("got ID %q, want spoke-a", got.ID)
+	}
+	if len(got.Tokens) != 2 {
+		t.Errorf("got %d tokens, want 2", len(got.Tokens))
+	}
+	if len(got.Certs) != 1 || got.Certs[0].Name != "cert-a" {
+		t.Errorf("got certs %+v, want one cert-a", got.Certs)
+	}
+}
+
 func TestCreateSpoke_RejectsDuplicateID(t *testing.T) {
 	st := openTestStore(t)
 	if err := st.CreateSpoke("spoke-a", "token-a"); err != nil {

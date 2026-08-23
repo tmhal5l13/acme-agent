@@ -161,6 +161,53 @@ func (s *Store) SpokeExists(spokeID string) (bool, error) {
 	return exists, nil
 }
 
+// GetSpoke returns one spoke's full desired state - identity, tokens, and
+// certificate assignments. Returns ErrNotFound if spokeID doesn't exist.
+// Callers that already need every spoke (internal/hubapi.buildState)
+// should use AllSpokes instead; this exists for callers (internal/onboard)
+// that only ever act on one spoke at a time and don't need the extra
+// queries AllSpokes does for the rest.
+func (s *Store) GetSpoke(spokeID string) (Spoke, error) {
+	exists, err := s.SpokeExists(spokeID)
+	if err != nil {
+		return Spoke{}, fmt.Errorf("get spoke %q: %w", spokeID, err)
+	}
+	if !exists {
+		return Spoke{}, fmt.Errorf("get spoke %q: %w", spokeID, ErrNotFound)
+	}
+
+	tokens, err := s.spokeTokens(spokeID)
+	if err != nil {
+		return Spoke{}, fmt.Errorf("get spoke %q: %w", spokeID, err)
+	}
+	certs, err := s.spokeCerts(spokeID)
+	if err != nil {
+		return Spoke{}, fmt.Errorf("get spoke %q: %w", spokeID, err)
+	}
+	return Spoke{ID: spokeID, Tokens: tokens, Certs: certs}, nil
+}
+
+func (s *Store) spokeTokens(spokeID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT token FROM spoke_tokens WHERE spoke_id = ?`, spokeID)
+	if err != nil {
+		return nil, fmt.Errorf("query tokens for spoke %q: %w", spokeID, err)
+	}
+	defer rows.Close()
+
+	var tokens []string
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			return nil, fmt.Errorf("scan token row for spoke %q: %w", spokeID, err)
+		}
+		tokens = append(tokens, token)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate token rows for spoke %q: %w", spokeID, err)
+	}
+	return tokens, nil
+}
+
 // AllSpokes returns every spoke's full desired state - identity, tokens,
 // and certificate assignments - the database-backed equivalent of
 // ranging over config.HubConfig.Spokes. Three separate queries (spokes,

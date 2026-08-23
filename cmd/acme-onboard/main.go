@@ -1,8 +1,10 @@
-// Command acme-onboard generates the matching hub-config snippet and spoke
-// config.yaml needed to add one certificate to one spoke. It never edits
-// any file itself (except optionally writing the new spoke's config.yaml
-// to a path you give it) — it only prints what to paste where, after
-// validating the request against the hub's real, current config.
+// Command acme-onboard adds one certificate to one spoke: a scriptable,
+// non-interactive alternative to the hub's web admin UI, for the same
+// same-host, direct-database-access operational model
+// acme-hub --generate-token already uses. Writes the hub side (spoke,
+// token, certificate assignment) straight into the hub's database — see
+// internal/onboard — and, unless told otherwise, writes the new spoke's
+// complete config.yaml to a file for you to copy over.
 package main
 
 import (
@@ -12,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 	"github.com/tmhal5l13/acme-agent/internal/onboard"
 )
 
@@ -45,6 +48,12 @@ func run() error {
 		return fmt.Errorf("load hub config: %w", err)
 	}
 
+	st, err := hubstore.Open(hubCfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
 	var domainList []string
 	for _, d := range strings.Split(*domains, ",") {
 		if d = strings.TrimSpace(d); d != "" {
@@ -52,7 +61,7 @@ func run() error {
 		}
 	}
 
-	result, err := onboard.Plan(hubCfg, onboard.Request{
+	result, err := onboard.Plan(st, onboard.Request{
 		SpokeID:        *spokeID,
 		CertName:       *certName,
 		Domains:        domainList,
@@ -67,18 +76,13 @@ func run() error {
 		return err
 	}
 
-	fmt.Println("=== Add to the hub's config.yaml, under `spokes:` ===")
-	fmt.Print(result.HubConfigYAML)
-	fmt.Println()
-
 	if result.IsNewSpoke {
-		fmt.Println("=== Add to the hub's acme-hub.env ===")
-		fmt.Printf("%s=%s\n", result.HubEnvVarName, result.Token)
+		fmt.Printf("Created spoke %q on the hub.\n", *spokeID)
 	} else {
-		fmt.Println("(existing spoke — its token in acme-hub.env is unchanged)")
+		fmt.Printf("Added certificate %q to existing spoke %q.\n", *certName, *spokeID)
 	}
-	fmt.Println()
-	fmt.Println("Restart the hub after editing its config — no hot-reload.")
+	fmt.Println("This takes effect the next time the hub reloads:")
+	fmt.Println("  systemctl reload acme-hub   # or: kill -HUP $(pidof acme-hub)")
 	fmt.Println()
 
 	fmt.Printf("Copy the hub's TLS certificate to %s on this spoke, and verify\n", *hubTLSCertFile)
