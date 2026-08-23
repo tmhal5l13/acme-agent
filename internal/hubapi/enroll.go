@@ -32,11 +32,11 @@ type enrollResponse struct {
 //
 // The sequence below matters: LookupEnrollmentToken (read-only) runs
 // before RedeemEnrollmentToken (consumes the secret), specifically so a
-// secret that's valid but whose spoke isn't in the hub's live config yet
-// (the operator hasn't pasted the generated snippet and reloaded) is
-// never burned on that attempt - the spoke can retry with the exact same
-// secret once the operator finishes. Redeeming unconditionally on first
-// contact would permanently strand that retry.
+// secret that's valid but whose spoke isn't in the hub's live desired
+// state yet (the write that created it hasn't reloaded into hubState -
+// see "Config hot-reload") is never burned on that attempt - the spoke
+// can retry with the exact same secret once it has. Redeeming
+// unconditionally on first contact would permanently strand that retry.
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req enrollRequest
@@ -65,8 +65,8 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	state := s.state.Load()
 	spoke, exists := state.spokes[spokeID]
 	if !exists {
-		slog.Warn("enroll: spoke not yet in hub config", "spoke", spokeID)
-		http.Error(w, "spoke not yet configured on the hub - add the printed hub-config snippet under spokes: and reload the hub (SIGHUP), then retry with the same token", http.StatusServiceUnavailable)
+		slog.Warn("enroll: spoke not yet in hub's live desired state", "spoke", spokeID)
+		http.Error(w, "spoke not yet visible to the hub - if it was just created via the web admin UI this should resolve on its own within moments; if created via a CLI tool, reload the hub (SIGHUP) and retry with the same token", http.StatusServiceUnavailable)
 		return
 	}
 

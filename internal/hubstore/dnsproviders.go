@@ -8,11 +8,10 @@ import (
 )
 
 // UpsertDNSProvider creates or updates one named DNS provider config,
-// credentials included - the database-backed equivalent of an entry
-// under config.HubConfig.DNSProviders. Doesn't validate cfg.Type against
-// the set of provider types internal/dnsprovider actually implements
-// (hubstore doesn't import that package, and never has) - same as today,
-// an unknown/unsupported type surfaces later, when
+// credentials included. Doesn't validate cfg.Type against the set of
+// provider types internal/dnsprovider actually implements (hubstore
+// doesn't import that package, and never has) - an unknown/unsupported
+// type surfaces later, when
 // internal/hubapi.buildState tries to actually construct a
 // challenge.Provider from it.
 func (s *Store) UpsertDNSProvider(name string, cfg config.DNSProviderConfig) error {
@@ -83,9 +82,7 @@ func (s *Store) DNSProviderExists(name string) (bool, error) {
 	return exists, nil
 }
 
-// AllDNSProviders returns every configured DNS provider, keyed by name -
-// the database-backed equivalent of ranging over
-// config.HubConfig.DNSProviders.
+// AllDNSProviders returns every configured DNS provider, keyed by name.
 func (s *Store) AllDNSProviders() (map[string]config.DNSProviderConfig, error) {
 	rows, err := s.db.Query(`SELECT name, config_json FROM dns_providers`)
 	if err != nil {

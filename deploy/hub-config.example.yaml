@@ -63,10 +63,11 @@ notify_timeout: 30s
 # success, expiry) - see ARCHITECTURE.md "Status/dashboard API". A
 # separate credential from any spoke's own token, deliberately: a spoke's
 # token only ever authorizes it for its own certificates, which would
-# defeat the point of a fleet-wide view. Also gates a read-only HTML
-# dashboard at GET /admin (HTTP Basic Auth, username ignored, this token
-# as the password) - see ARCHITECTURE.md "Web admin UI". Left unset,
-# neither endpoint exists at all.
+# defeat the point of a fleet-wide view. Also gates the full web admin UI
+# at GET /admin (HTTP Basic Auth, username ignored, this token as the
+# password) - add/remove spokes, tokens, certificates, and DNS providers,
+# not just view status - see ARCHITECTURE.md "Web admin UI". Left unset,
+# none of these endpoints exist at all.
 # status_token: "${STATUS_TOKEN}"
 
 # DNS providers and spokes are NOT configured in this file - they're

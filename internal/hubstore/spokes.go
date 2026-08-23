@@ -209,9 +209,8 @@ func (s *Store) spokeTokens(spokeID string) ([]string, error) {
 }
 
 // AllSpokes returns every spoke's full desired state - identity, tokens,
-// and certificate assignments - the database-backed equivalent of
-// ranging over config.HubConfig.Spokes. Three separate queries (spokes,
-// tokens, certs) merged in Go, rather than one join, to avoid duplicate-row
+// and certificate assignments. Three separate queries (spokes, tokens,
+// certs) merged in Go, rather than one join, to avoid duplicate-row
 // fan-out from a spoke with multiple tokens and multiple certs at once.
 func (s *Store) AllSpokes() ([]Spoke, error) {
 	ids, err := s.allSpokeIDs()

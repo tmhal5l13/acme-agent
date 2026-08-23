@@ -1,6 +1,8 @@
-// Package hubstore persists the hub's observed state: what each spoke has
-// last reported about its own certificates. Desired state (domains, DNS
-// provider, policy) lives in config.HubConfig instead.
+// Package hubstore persists both the hub's observed state (what each
+// spoke has last reported about its own certificates) and its desired
+// state (which spokes exist, their tokens, their certificate/DNS-provider
+// assignments, and DNS provider configs) - config.HubConfig only holds
+// startup-only settings now (listen_addr, TLS paths, hooks, and so on).
 package hubstore
 
 import (
