@@ -112,33 +112,14 @@ func TestEnsureTLS_TLSHostUnsetFallsBackToListenAddr(t *testing.T) {
 const hubConfigV1 = `
 listen_addr: "127.0.0.1:8443"
 data_dir: /var/lib/acme-hub
-dns_providers:
-  route53_main:
-    type: route53
-spokes:
-  spoke-a:
-    tokens:
-      - token-a
-    certs:
-      - name: cert-a
-        domains: [example.com]
-        dns_provider: route53_main
 `
 
-const hubConfigV2 = hubConfigV1 + `
-  spoke-b:
-    tokens:
-      - token-b
-    certs:
-      - name: cert-b
-        domains: [other.example.com]
-        dns_provider: route53_main
-`
-
-// TestWatchForReload_PicksUpSIGHUP is the real-signal proof behind this
-// PR's whole point: rewrite the config file a running hub is watching,
-// send it a real SIGHUP (not a simulated call to Reload directly - this
-// is specifically testing that the signal plumbing itself works), and
+// TestWatchForReload_PicksUpSIGHUP is the real-signal proof behind the
+// original hot-reload PR's whole point: write a new spoke directly into
+// the database a running hub is backed by (config.yaml itself no longer
+// changes - desired state lives in hubstore now, see PR3's cutover), send
+// a real SIGHUP (not a simulated call to Reload directly - this is
+// specifically testing that the signal plumbing itself works), and
 // confirm the change takes effect without restarting the process.
 func TestWatchForReload_PicksUpSIGHUP(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -156,6 +137,18 @@ func TestWatchForReload_PicksUpSIGHUP(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
+
+	if err := st.UpsertDNSProvider("route53_main", config.DNSProviderConfig{Type: "route53"}); err != nil {
+		t.Fatalf("seed dns provider: %v", err)
+	}
+	if err := st.CreateSpoke("spoke-a", "token-a"); err != nil {
+		t.Fatalf("seed spoke-a: %v", err)
+	}
+	if err := st.UpsertSpokeCert("spoke-a", config.SpokeCertConfig{
+		Name: "cert-a", Domains: []string{"example.com"}, DNSProvider: "route53_main",
+	}); err != nil {
+		t.Fatalf("seed cert-a: %v", err)
+	}
 
 	server, err := hubapi.NewServer(cfg, st)
 	if err != nil {
@@ -187,8 +180,13 @@ func TestWatchForReload_PicksUpSIGHUP(t *testing.T) {
 		t.Fatalf("got status %d for spoke-b before reload, want 401", rec.Code)
 	}
 
-	if err := os.WriteFile(configPath, []byte(hubConfigV2), 0o644); err != nil {
-		t.Fatalf("rewrite config: %v", err)
+	if err := st.CreateSpoke("spoke-b", "token-b"); err != nil {
+		t.Fatalf("create spoke-b: %v", err)
+	}
+	if err := st.UpsertSpokeCert("spoke-b", config.SpokeCertConfig{
+		Name: "cert-b", Domains: []string{"other.example.com"}, DNSProvider: "route53_main",
+	}); err != nil {
+		t.Fatalf("create cert-b: %v", err)
 	}
 	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
 		t.Fatalf("send SIGHUP: %v", err)

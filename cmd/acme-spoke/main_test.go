@@ -138,22 +138,24 @@ func TestRunLoadToken_FullRoundTrip(t *testing.T) {
 	const bearerToken = "the-real-bearer-token"
 	const secret = "the-one-time-secret"
 
-	hubCfg := &config.HubConfig{
-		Spokes: map[string]config.SpokeEntry{
-			"radius-spoke": {
-				Tokens: []string{bearerToken},
-				Certs: []config.SpokeCertConfig{
-					{Name: "radius-cert", Domains: []string{"radius.example.com"}, DNSProvider: "route53_main"},
-				},
-			},
-		},
-	}
+	hubCfg := &config.HubConfig{}
 
 	st, err := hubstore.Open(filepath.Join(hubDir, "hub.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+	if err := st.UpsertDNSProvider("route53_main", config.DNSProviderConfig{Type: "route53"}); err != nil {
+		t.Fatalf("UpsertDNSProvider: %v", err)
+	}
+	if err := st.CreateSpoke("radius-spoke", bearerToken); err != nil {
+		t.Fatalf("CreateSpoke: %v", err)
+	}
+	if err := st.UpsertSpokeCert("radius-spoke", config.SpokeCertConfig{
+		Name: "radius-cert", Domains: []string{"radius.example.com"}, DNSProvider: "route53_main",
+	}); err != nil {
+		t.Fatalf("UpsertSpokeCert: %v", err)
+	}
 	if err := st.InsertEnrollmentToken(secret, "radius-spoke", bearerToken, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("InsertEnrollmentToken: %v", err)
 	}

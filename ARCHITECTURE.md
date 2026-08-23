@@ -235,80 +235,113 @@ populated the standard way via `EnvironmentFile=`; `acme-hub.env` is
 `0640`, group `acme-hub-secrets` — see "Config hot-reload" below for why
 the hub's case needs more than that.
 
+## Database-backed desired state
+
+Which spokes exist, their bearer tokens, their certificate/DNS-provider
+assignments, and DNS provider configs (credentials included) live in the
+hub's own SQLite database (`internal/hubstore`), not `config.yaml` —
+moved there so a write-capable web admin UI (and CLI tools:
+`cmd/acme-onboard`, `acme-hub --generate-token`) can create/edit/delete
+them directly, taking effect on the very next reload instead of requiring
+a hand-edited config file. `config.yaml` keeps exactly the fields already
+established as startup-only/restart-only before this change —
+`listen_addr`, `data_dir`, `db_path`, TLS paths, `status_token`, hooks,
+timeouts, `acme_defaults` — the same set "Config hot-reload" below has
+always excluded from hot-reload, which turns out to be exactly the
+YAML/database split this needed. A `config.yaml` that still has a
+`spokes:` or `dns_providers:` key is a load-time error pointing at
+`acme-hub --import-config`, a one-shot migration command for a file
+written before this change — not silently ignored.
+
+New `hubstore` tables: `spokes`, `spoke_tokens` (its own primary key is
+what gives "a bearer token must be globally unique across every spoke"
+for free, replacing the app-level check `config.HubConfig.validate()`
+used to make across a whole YAML document at once), `spoke_certs`
+(domains and any `domain_dns_providers` override stored as JSON columns,
+reusing `config.SpokeCertConfig` directly rather than inventing a new
+relational shape for data nothing ever queries by substructure), and
+`dns_providers` (the full `config.DNSProviderConfig`, JSON-marshaled,
+credentials included). No SQL foreign keys, matching this schema's
+existing precedent (`spoke_cert_state` has none either); referential
+integrity (a cert's `dns_provider` must exist, a provider can't be
+removed while referenced) is enforced in Go, transactionally, by
+`internal/hubstore`'s own methods — `UpsertSpokeCert` in particular also
+runs `config.ValidateCertName`/`ValidateDomain` itself, not just leaving
+that to callers, since `ValidateCertName`'s path-traversal guard used to
+only ever run at YAML-load time; once writes go straight to the database
+there's no load-time safety net left downstream to catch it if a caller
+forgot.
+
+**DNS provider credentials in the database are no less protected than
+the `${VAR}`-indirected `acme-hub.env` file they replaced.** The SQLite
+file is created by the hub process itself at first boot, under whatever
+`DynamicUser` UID that particular boot got — no cross-boot ownership
+mismatch, unlike `acme-hub.env` (a static, pre-existing file that needs
+the `SupplementaryGroups` grant described below precisely because
+successive boots get different UIDs). Storing credentials as cleartext
+JSON in the database needs no new systemd grant and is at least as
+tight as the model it replaced.
+
 ## Config hot-reload
 
 Sending the hub process `SIGHUP` (`kill -HUP $(pidof acme-hub)`, or
-`systemctl reload acme-hub`) re-reads `config.yaml` and applies it live —
-no restart, no dropped connections, no in-flight request affected.
+`systemctl reload acme-hub`) rebuilds the hub's desired state and swaps
+it in live — no restart, no dropped connections, no in-flight request
+affected.
 
 Only two things actually change this way: `spokes` and `dns_providers`
 (and everything derived from them — the token→spoke index, the
-`challenge.Provider` built per DNS provider). That's a deliberate, narrow
-scope, not a partial implementation of "reload everything": `listen_addr`,
-`tls_cert_file`/`tls_key_file`, `data_dir`, and `db_path` are all resources
-already bound at process start (a listening socket, an open database file)
-— `internal/hubapi` never reads any of them at all, only `cmd/acme-hub`
-does, once, before the `Server` is even constructed — so there's nothing
-for a reload to meaningfully change there short of a real restart.
+`challenge.Provider` built per DNS provider) — read from the hub's
+**database** (`internal/hubstore`), not `config.yaml`, since the
+database-backed-desired-state cutover (see "Database-backed desired
+state" below). That's a deliberate, narrow scope, not a partial
+implementation of "reload everything": `listen_addr`, `tls_cert_file`/
+`tls_key_file`, `data_dir`, `db_path`, and `status_token` are all
+resources already bound at process start (a listening socket, an open
+database file) or deliberately excluded from the hot-reloadable set —
+`internal/hubapi` never reads any of the former at all, only
+`cmd/acme-hub` does, once, before the `Server` is even constructed — so
+there's nothing for a reload to meaningfully change there short of a
+real restart.
 
-Internally, `hubapi.Server` bundles its config, token index, and DNS
-provider map into one `hubState` struct held behind an `atomic.Pointer` —
-every request handler loads it once per request and reads through that
-snapshot, so a reload landing mid-request can never leave a handler
-looking at, say, this reload's token index paired with the previous
-reload's config (the actual bug class this design rules out by
-construction, verified under `-race` with concurrent readers hammering the
-server while reloads happen in a loop). `Server.Reload` rebuilds the whole
-`hubState` from the new config and only swaps it in if that succeeds — a
-bad reload (e.g. a cert now referencing an unknown `dns_provider`) is
-logged and the prior state keeps serving untouched, never partially
-applied.
+Internally, `hubapi.Server` bundles its config, spoke desired state,
+token index, and DNS provider map into one `hubState` struct held behind
+an `atomic.Pointer` — every request handler loads it once per request and
+reads through that snapshot, so a reload landing mid-request can never
+leave a handler looking at, say, this reload's token index paired with a
+different reload's spoke list (the actual bug class this design rules
+out by construction, verified under `-race` with concurrent readers
+hammering the server while a genuinely changing desired state reloads in
+a loop). `Server.Reload`/`buildState` rebuild the whole `hubState` from
+the database and only swap it in if that succeeds — a bad reload (e.g. a
+stored DNS provider config with an unbuildable type) is logged and the
+prior state keeps serving untouched, never partially applied.
 
-This is what makes low-friction spoke enrollment (see "Onboarding a
-spoke") actually low-friction on the hub side too: adding a spoke no
-longer means restarting the hub, just pasting the generated snippet and
-sending one signal. `deploy/acme-hub.service` sets `ExecReload=/bin/kill
--HUP $MAINPID` specifically so `systemctl reload acme-hub` works — a
-plain `Type=simple` unit has no reload behavior at all without one.
+**Two kinds of writer, one signal.** A write from the hub's own web admin
+UI (see "Web admin UI" below) runs **in-process** — its handler calls
+`Server.Reload` itself, synchronously, right after its own database
+write, so a browser action is live on the very next request, no signal
+involved at all. A write from a separate CLI process on the same host
+(`cmd/acme-onboard`, `acme-hub --generate-token`, `--import-config`) has
+no such hook into the already-running hub process — it writes straight
+into the same database file, and the running hub genuinely has no way to
+notice until it's told. `SIGHUP` is that "tell it" mechanism, unchanged
+in every respect except what it now resyncs from: `deploy/acme-hub.service`
+sets `ExecReload=/bin/kill -HUP $MAINPID` specifically so `systemctl
+reload acme-hub` works at all — a plain `Type=simple` unit has no reload
+behavior without one — and `cmd/acme-hub`'s `watchForReload` calls
+`Server.Reload` on receipt, exactly as it always has.
 
-**Why this needed more than just re-reading `config.yaml`.** A newly
-enrolled spoke's bearer token — or a newly added DNS provider's
-credential — always references a brand-new `${VAR}`, since it's freshly
-generated. Environment variables are fixed in a process's environment at
-the moment it's exec'd; nothing a running process does afterward,
-including re-parsing its own config, can see a variable that didn't exist
-when it started. So `LoadHubConfig` doesn't resolve `${VAR}` from the
-process's environment at all — it reads `acme-hub.env` (next to
-`config.yaml`, by convention) directly, fresh, on every call, falling
-back to the process's own environment only for a name not found in the
-file, or if the file can't be read at all (see below). This is why one
-function handles both startup and every later reload identically, with no
-separate "reload mode."
-
-Reading that file directly needs real read access to it, which is where
-`DynamicUser=yes` complicates things: the hub's UID is freshly allocated
-by systemd every start, with no standing grants to anything. A root-owned
-`0600` file — which is all `EnvironmentFile=` alone ever required, since
-*systemd itself* reads it as root before dropping to the dynamic UID —
-isn't readable by the hub process on its own. `acme-hub.service` grants
-it access via `SupplementaryGroups=acme-hub-secrets`: a *stable* group
-(unlike the UID, which isn't stable across restarts) that
-`install-hub.sh` creates and sets as `acme-hub.env`'s group, `0640`. If
-that grant is ever missing or misconfigured, `LoadHubConfig` doesn't fail
-outright — a permission error falls back to the process's own
-environment the same way a missing file does, degrading to exactly the
-pre-fix behavior (reload works, just can't see anything added to the file
-since startup) rather than breaking the hub.
-
-`DynamicUser`'s interaction with `SupplementaryGroups` specifically can't
-be verified the rootless `systemd-run --user` way the rest of this unit's
-hardening was (see below — `DynamicUser` requires the real system
-manager, not a user session), so it was checked directly instead: a real
-`0640 root:acme-hub-secrets` file, a real `systemd-run
---property=DynamicUser=yes` transient unit denied access without
-`SupplementaryGroups=acme-hub-secrets` set (`Permission denied`) and
-granted access with it set (reads the file successfully) — both cases
-confirmed empirically, not just reasoned through.
+`config.yaml`'s own `${VAR}` expansion (`fileEnvSource`, reading
+`acme-hub.env` fresh on every `LoadHubConfig` call, including every
+SIGHUP) still exists and still matters — just for a much smaller set of
+fields now that spoke tokens and DNS provider credentials no longer live
+there at all: `status_token` is the main remaining example. The
+`DynamicUser=yes` + `SupplementaryGroups=acme-hub-secrets` grant that
+lets the hub's freshly-allocated per-boot UID actually read that file
+(verified empirically via real `systemd-run --property=DynamicUser=yes`
+tests — denied without the group grant, allowed with it) is unchanged and
+still correct; it just backs a narrower story than it used to.
 
 ## Cross-platform builds
 

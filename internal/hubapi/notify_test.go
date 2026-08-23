@@ -59,7 +59,7 @@ func readMarkerLines(t *testing.T, marker string) []string {
 
 func TestNotify_FirstCheckinActiveDoesNotFire(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, notifyTestConfig(marker), nil)
+	s := newTestServer(t, notifyTestConfig(marker), testSpokes(), nil)
 
 	checkin(t, s, "active") // unknown -> active: not a failure transition
 
@@ -70,7 +70,7 @@ func TestNotify_FirstCheckinActiveDoesNotFire(t *testing.T) {
 
 func TestNotify_FirstCheckinFailedFires(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, notifyTestConfig(marker), nil)
+	s := newTestServer(t, notifyTestConfig(marker), testSpokes(), nil)
 
 	checkin(t, s, "failed") // unknown -> failed: alert-worthy even with no prior success
 
@@ -85,7 +85,7 @@ func TestNotify_FirstCheckinFailedFires(t *testing.T) {
 
 func TestNotify_ActiveToFailedFires(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, notifyTestConfig(marker), nil)
+	s := newTestServer(t, notifyTestConfig(marker), testSpokes(), nil)
 
 	checkin(t, s, "active")
 	checkin(t, s, "failed")
@@ -101,7 +101,7 @@ func TestNotify_ActiveToFailedFires(t *testing.T) {
 
 func TestNotify_RepeatedFailureDoesNotRefire(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, notifyTestConfig(marker), nil)
+	s := newTestServer(t, notifyTestConfig(marker), testSpokes(), nil)
 
 	checkin(t, s, "active")
 	checkin(t, s, "failed") // fires: active -> failed
@@ -116,7 +116,7 @@ func TestNotify_RepeatedFailureDoesNotRefire(t *testing.T) {
 
 func TestNotify_RecoveryFires(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, notifyTestConfig(marker), nil)
+	s := newTestServer(t, notifyTestConfig(marker), testSpokes(), nil)
 
 	checkin(t, s, "active")
 	checkin(t, s, "failed")
@@ -143,7 +143,7 @@ func TestNotify_FailedCheckinReportsPreservedNotAfter(t *testing.T) {
 	cfg := testConfig()
 	cfg.NotifyHook = `echo "$ACME_STATUS $ACME_NOT_AFTER" >> ` + marker
 	cfg.NotifyTimeout = config.Duration(2 * time.Second)
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, testSpokes(), nil)
 
 	notAfter := time.Now().Add(60 * 24 * time.Hour).UTC().Truncate(time.Second)
 	activeBody, _ := json.Marshal(checkinRequest{
@@ -175,7 +175,7 @@ func TestNotify_FailedCheckinReportsPreservedNotAfter(t *testing.T) {
 
 func TestNotify_DisabledByEmptyHook(t *testing.T) {
 	cfg := testConfig() // NotifyHook left empty
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, testSpokes(), nil)
 
 	checkin(t, s, "active")
 	checkin(t, s, "failed")

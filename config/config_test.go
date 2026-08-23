@@ -373,17 +373,7 @@ func TestLoadHubConfig_ResolvesVariableOnlyPresentInEnvFile(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`
 listen_addr: "127.0.0.1:8443"
 data_dir: /var/lib/acme-hub
-dns_providers:
-  route53_main:
-    type: route53
-spokes:
-  new-spoke:
-    tokens:
-      - "${ACME_AGENT_TEST_ONLY_IN_ENV_FILE}"
-    certs:
-      - name: new-cert
-        domains: [new.example.com]
-        dns_provider: route53_main
+status_token: "${ACME_AGENT_TEST_ONLY_IN_ENV_FILE}"
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -395,8 +385,8 @@ spokes:
 	if err != nil {
 		t.Fatalf("LoadHubConfig: %v", err)
 	}
-	if got := cfg.Spokes["new-spoke"].Tokens[0]; got != "secret-value" {
-		t.Errorf("got token %q, want secret-value", got)
+	if cfg.StatusToken != "secret-value" {
+		t.Errorf("got status_token %q, want secret-value", cfg.StatusToken)
 	}
 }
 
@@ -412,17 +402,7 @@ func TestLoadHubConfig_NoEnvFileFallsBackToProcessEnv(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`
 listen_addr: "127.0.0.1:8443"
 data_dir: /var/lib/acme-hub
-dns_providers:
-  route53_main:
-    type: route53
-spokes:
-  spoke-a:
-    tokens:
-      - "${ACME_AGENT_TEST_NO_ENV_FILE}"
-    certs:
-      - name: cert-a
-        domains: [example.com]
-        dns_provider: route53_main
+status_token: "${ACME_AGENT_TEST_NO_ENV_FILE}"
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -432,8 +412,8 @@ spokes:
 	if err != nil {
 		t.Fatalf("LoadHubConfig: %v", err)
 	}
-	if got := cfg.Spokes["spoke-a"].Tokens[0]; got != "from-process-env" {
-		t.Errorf("got token %q, want from-process-env", got)
+	if cfg.StatusToken != "from-process-env" {
+		t.Errorf("got status_token %q, want from-process-env", cfg.StatusToken)
 	}
 }
 

@@ -21,7 +21,7 @@ func doEnroll(s *Server, secret string) *httptest.ResponseRecorder {
 }
 
 func TestHandleEnroll_ValidSecretForConfiguredSpokeSucceeds(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	if err := s.store.InsertEnrollmentToken("secret-a", "spoke-a", "token-a", time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("InsertEnrollmentToken: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestHandleEnroll_ValidSecretForConfiguredSpokeSucceeds(t *testing.T) {
 }
 
 func TestHandleEnroll_UnknownSecretRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	resp := doEnroll(s, "no-such-secret")
 	if resp.Code != 401 {
 		t.Fatalf("got status %d, want 401", resp.Code)
@@ -55,7 +55,7 @@ func TestHandleEnroll_UnknownSecretRejected(t *testing.T) {
 }
 
 func TestHandleEnroll_ExpiredSecretRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	if err := s.store.InsertEnrollmentToken("secret-a", "spoke-a", "token-a", time.Now().UTC().Add(-time.Minute)); err != nil {
 		t.Fatalf("InsertEnrollmentToken: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestHandleEnroll_ExpiredSecretRejected(t *testing.T) {
 }
 
 func TestHandleEnroll_AlreadyRedeemedSecretRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	if err := s.store.InsertEnrollmentToken("secret-a", "spoke-a", "token-a", time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("InsertEnrollmentToken: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestHandleEnroll_AlreadyRedeemedSecretRejected(t *testing.T) {
 }
 
 func TestHandleEnroll_InvalidBodyRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	r := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/enroll", bytes.NewReader([]byte("not json")))
 	s.Handler().ServeHTTP(r, req)
@@ -93,7 +93,7 @@ func TestHandleEnroll_InvalidBodyRejected(t *testing.T) {
 }
 
 func TestHandleEnroll_EmptySecretRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	resp := doEnroll(s, "")
 	if resp.Code != 400 {
 		t.Fatalf("got status %d for an empty secret, want 400", resp.Code)
@@ -103,26 +103,36 @@ func TestHandleEnroll_EmptySecretRejected(t *testing.T) {
 // TestHandleEnroll_SpokeNotYetConfiguredDoesNotConsumeSecret is the most
 // important test in this file: proves the specific ordering handleEnroll
 // depends on for correctness (see its doc comment) - a secret whose spoke
-// isn't in the hub's live config yet gets a 503 without being burned, and
-// the exact same secret succeeds once the operator adds the spoke and the
-// hub reloads (via Server.Reload, not a restart - see PR 1).
+// isn't in the hub's live desired state yet gets a 503 without being
+// burned, and the exact same secret succeeds once the spoke is created
+// and the hub reloads (via Server.Reload, which - since the PR3 cutover -
+// rebuilds state from the database, not a restart).
 func TestHandleEnroll_SpokeNotYetConfiguredDoesNotConsumeSecret(t *testing.T) {
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
+	cfg := testConfig()
+	s := newTestServer(t, cfg, testSpokes(), map[string]challenge.Provider{"fake": &fakeDNSProvider{}})
 	if err := s.store.InsertEnrollmentToken("secret-new", "spoke-new", "token-new", time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("InsertEnrollmentToken: %v", err)
 	}
 
 	resp := doEnroll(s, "secret-new")
 	if resp.Code != 503 {
-		t.Fatalf("got status %d before spoke-new exists in config, want 503, body=%s", resp.Code, resp.Body.String())
+		t.Fatalf("got status %d before spoke-new exists, want 503, body=%s", resp.Code, resp.Body.String())
 	}
 
-	cfg := testConfig()
-	cfg.Spokes["spoke-new"] = config.SpokeEntry{
-		Tokens: []string{"token-new"},
-		Certs: []config.SpokeCertConfig{
-			{Name: "cert-new", Domains: []string{"new.example.com"}, DNSProvider: "fake"},
-		},
+	// Reload rebuilds state entirely from the store (see buildState), so
+	// the new spoke's cert needs a real, store-registered dns_provider -
+	// "fake" (only ever injected directly into the initial hubState by
+	// newTestServer, bypassing the store) won't survive a real reload.
+	if err := s.store.UpsertDNSProvider("route53", config.DNSProviderConfig{Type: "route53"}); err != nil {
+		t.Fatalf("UpsertDNSProvider: %v", err)
+	}
+	if err := s.store.CreateSpoke("spoke-new", "token-new"); err != nil {
+		t.Fatalf("CreateSpoke: %v", err)
+	}
+	if err := s.store.UpsertSpokeCert("spoke-new", config.SpokeCertConfig{
+		Name: "cert-new", Domains: []string{"new.example.com"}, DNSProvider: "route53",
+	}); err != nil {
+		t.Fatalf("UpsertSpokeCert: %v", err)
 	}
 	if err := s.Reload(cfg); err != nil {
 		t.Fatalf("Reload: %v", err)

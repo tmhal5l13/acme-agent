@@ -88,7 +88,7 @@ func (state *watchdogState) watchdogPass(ctx context.Context, s *Server) {
 	staleAfter := hs.cfg.WatchdogStaleAfter.Duration()
 	now := time.Now()
 
-	for spokeID, spoke := range hs.cfg.Spokes {
+	for spokeID, spoke := range hs.spokes {
 		for _, cert := range spoke.Certs {
 			key := spokeID + "/" + cert.Name
 

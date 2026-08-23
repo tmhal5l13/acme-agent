@@ -32,7 +32,7 @@ type statusEntry struct {
 // package, it isn't scoped to one spoke's own certificates (see
 // HubConfig.StatusToken's doc comment on why that needs a separate
 // credential). Merges observed state (internal/hubstore, what's actually
-// been reported) with desired state (cfg.Spokes, what's configured) so a
+// been reported) with desired state (state.spokes, what's configured) so a
 // certificate that's configured but has never once checked in still
 // appears - as status "unknown", the same default hubstore itself uses -
 // rather than silently missing from the response entirely.
@@ -62,7 +62,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminEntries merges observed state (s.store.All()) with desired state
-// (state.cfg.Spokes[*].Certs) into one deterministically-sorted slice - a
+// (state.spokes[*].Certs) into one deterministically-sorted slice - a
 // configured-but-never-checked-in cert still appears as "unknown" rather
 // than being silently missing. Shared by handleStatus (JSON) and
 // handleAdminDashboard (HTML) so the two views can never structurally
@@ -78,7 +78,7 @@ func (s *Server) adminEntries(state *hubState) ([]statusEntry, error) {
 	}
 
 	var entries []statusEntry
-	for spokeID, spoke := range state.cfg.Spokes {
+	for spokeID, spoke := range state.spokes {
 		for _, cert := range spoke.Certs {
 			cs, ok := byKey[spokeID+"/"+cert.Name]
 			if !ok {

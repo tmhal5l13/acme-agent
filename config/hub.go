@@ -4,18 +4,34 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
-// HubConfig is the top-level shape of the hub's config.yaml. Domains, DNS
-// provider assignment, and renewal policy are desired state and live here;
-// internal/hubstore holds only what spokes have reported (observed state).
+// HubConfig is the top-level shape of the hub's config.yaml — everything
+// needed to start the process (listen_addr, data_dir, TLS, hooks,
+// timeouts). Spokes and DNS providers — which spokes exist, their
+// tokens, their cert/DNS-provider assignments, DNS provider credentials —
+// are desired state managed through the hub's database
+// (internal/hubstore) instead, not this file: see "Database-backed
+// desired state" in ARCHITECTURE.md for why, and acme-hub --import-config
+// for migrating an older config.yaml that still has spokes:/dns_providers:
+// sections.
 type HubConfig struct {
-	ListenAddr   string                       `yaml:"listen_addr"` // prefer a private/internal interface over a public one where your network allows it — see TLS below for why this isn't the primary security boundary
-	DataDir      string                       `yaml:"data_dir"`
-	DBPath       string                       `yaml:"db_path"` // optional; defaults under DataDir
-	ACMEDefaults ACMEDefaultsConfig           `yaml:"acme_defaults"`
-	DNSProviders map[string]DNSProviderConfig `yaml:"dns_providers"`
-	Spokes       map[string]SpokeEntry        `yaml:"spokes"`
+	ListenAddr   string             `yaml:"listen_addr"` // prefer a private/internal interface over a public one where your network allows it — see TLS below for why this isn't the primary security boundary
+	DataDir      string             `yaml:"data_dir"`
+	DBPath       string             `yaml:"db_path"` // optional; defaults under DataDir
+	ACMEDefaults ACMEDefaultsConfig `yaml:"acme_defaults"`
+
+	// LegacySpokes/LegacyDNSProviders exist only to detect a config file
+	// still carrying the pre-cutover spokes:/dns_providers: keys — plain
+	// yaml.Unmarshal silently ignores keys with no matching struct field,
+	// so without these, such a file would load "successfully" while
+	// silently ignoring desired state the operator thinks is in effect.
+	// validate() rejects a non-empty one with a pointer to
+	// --import-config, rather than leaving it silently ignored.
+	LegacySpokes       yaml.Node `yaml:"spokes"`
+	LegacyDNSProviders yaml.Node `yaml:"dns_providers"`
 
 	// TLSCertFile/TLSKeyFile locate the hub's TLS certificate and key.
 	// Both optional — if either is left blank, they default under DataDir
@@ -260,65 +276,11 @@ func (c *HubConfig) validate() error {
 	if c.DataDir == "" {
 		return fmt.Errorf("data_dir is required")
 	}
-	// No "at least one spoke" requirement: a freshly bootstrapped hub with
-	// zero spokes yet is a normal state (about to receive its first one via
-	// cmd/acme-onboard), not a misconfiguration — it just means the hub
-	// currently serves no one.
-
-	seenTokens := make(map[string]string, len(c.Spokes)) // token -> spoke id, to catch accidental reuse
-	for spokeID, spoke := range c.Spokes {
-		if len(spoke.Tokens) == 0 {
-			return fmt.Errorf("spokes[%s]: at least one entry under tokens is required", spokeID)
-		}
-		for _, token := range spoke.Tokens {
-			if token == "" {
-				return fmt.Errorf("spokes[%s]: tokens entries must not be empty", spokeID)
-			}
-			if other, ok := seenTokens[token]; ok {
-				return fmt.Errorf("spokes[%s]: token is also used by spokes[%s] — tokens must be unique, they're how a request is identified", spokeID, other)
-			}
-			seenTokens[token] = spokeID
-		}
-
-		if len(spoke.Certs) == 0 {
-			return fmt.Errorf("spokes[%s]: at least one entry under certs is required", spokeID)
-		}
-
-		seenNames := make(map[string]bool, len(spoke.Certs))
-		for _, cert := range spoke.Certs {
-			if err := ValidateCertName(cert.Name); err != nil {
-				return fmt.Errorf("spokes[%s]: %w", spokeID, err)
-			}
-			if seenNames[cert.Name] {
-				return fmt.Errorf("spokes[%s]: duplicate cert name %q", spokeID, cert.Name)
-			}
-			seenNames[cert.Name] = true
-
-			if len(cert.Domains) == 0 {
-				return fmt.Errorf("spokes[%s].certs[%s]: at least one domain is required", spokeID, cert.Name)
-			}
-			for _, d := range cert.Domains {
-				if err := ValidateDomain(d); err != nil {
-					return fmt.Errorf("spokes[%s].certs[%s]: %w", spokeID, cert.Name, err)
-				}
-			}
-			if _, ok := c.DNSProviders[cert.DNSProvider]; !ok {
-				return fmt.Errorf("spokes[%s].certs[%s]: dns_provider %q is not defined under dns_providers", spokeID, cert.Name, cert.DNSProvider)
-			}
-
-			domainSet := make(map[string]bool, len(cert.Domains))
-			for _, d := range cert.Domains {
-				domainSet[d] = true
-			}
-			for domain, provider := range cert.DomainDNSProviders {
-				if !domainSet[domain] {
-					return fmt.Errorf("spokes[%s].certs[%s]: domain_dns_providers references domain %q, which is not in this cert's domains", spokeID, cert.Name, domain)
-				}
-				if _, ok := c.DNSProviders[provider]; !ok {
-					return fmt.Errorf("spokes[%s].certs[%s]: domain_dns_providers[%s]: dns_provider %q is not defined under dns_providers", spokeID, cert.Name, domain, provider)
-				}
-			}
-		}
+	if !c.LegacySpokes.IsZero() {
+		return fmt.Errorf("config.yaml still has a spokes: section - spokes are now managed through the hub's database, not this file; run acme-hub --import-config to migrate it, then remove this section")
+	}
+	if !c.LegacyDNSProviders.IsZero() {
+		return fmt.Errorf("config.yaml still has a dns_providers: section - DNS providers are now managed through the hub's database, not this file; run acme-hub --import-config to migrate it, then remove this section")
 	}
 
 	return nil

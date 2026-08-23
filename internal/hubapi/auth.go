@@ -51,7 +51,7 @@ func (s *Server) authorize(r *http.Request) (spokeID string, cert config.SpokeCe
 	}
 
 	name := r.PathValue("name")
-	for _, c := range state.cfg.Spokes[spokeID].Certs {
+	for _, c := range state.spokes[spokeID].Certs {
 		if c.Name == name {
 			return spokeID, c, nil
 		}
