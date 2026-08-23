@@ -106,6 +106,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/certs/{name}/due", s.handleDue)
 	mux.HandleFunc("POST /v1/certs/{name}/dns01/present", s.handleDNS01Present)
 	mux.HandleFunc("POST /v1/certs/{name}/dns01/cleanup", s.handleDNS01Cleanup)
+	// Registered unconditionally, unlike /v1/status below - unlike a
+	// bearer token or the status token, an enrollment secret is minted
+	// per-spoke on demand (see cmd/acme-hub --generate-token), so there's
+	// no config setting that turns this endpoint on or off.
+	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
 	// /v1/status only exists at all when status_token is configured - see
 	// HubConfig.StatusToken's doc comment. Registering it unconditionally
 	// and rejecting every request when the token is empty would work too,

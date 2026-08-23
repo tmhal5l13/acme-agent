@@ -362,6 +362,39 @@ rejects an override referencing a domain not actually in that cert's
 `dns_provider` field. `internal/onboard`'s `Request.DomainDNSProviders`
 mirrors this for the generated hub config snippet.
 
+## Spoke enrollment (`POST /v1/enroll`)
+
+`POST /v1/enroll` is the hub-side half of a lower-friction alternative to
+manual onboarding (below) that's still in progress — the CLI tooling that
+generates and redeems tokens against this endpoint (`acme-hub
+--generate-token`, `acme-spoke --load-token`) is a separate, not-yet-built
+piece; this section documents what already exists.
+
+The endpoint redeems a one-time enrollment secret and hands back a
+brand-new spoke's real bearer token plus the certs/domains it's authorized
+for — the one place in this API a request needs no bearer token at all,
+since a spoke that hasn't enrolled yet has nothing to present. Secrets are
+tracked in a new `enrollment_tokens` table (schema version 4): `secret`
+(cleartext, matching how bearer tokens in `config.yaml` are handled — see
+`internal/hubapi/auth.go`'s `authorize` doc comment for why that's this
+project's deliberate pattern, not an oversight), `spoke_id`, the
+pre-generated `bearer_token` to hand back, `expires_at`, and `redeemed_at`
+— deliberately no cert/domain/DNS-provider assignment duplicated here;
+that already lives in `config.HubConfig.Spokes`, and reading it live at
+redemption time (via the hot-reloadable state from "Config hot-reload"
+above) is what guarantees it can never drift stale against a second copy.
+
+Redemption is atomic and genuinely single-use — `hubstore.Store.RedeemEnrollmentToken`
+follows the exact WHERE-guarded pattern `Claim` established for the
+renewal lease, proven under real concurrent goroutines the same way. One
+sequencing detail matters for correctness: the handler checks whether the
+secret's associated spoke is actually present in the hub's *current*
+config *before* consuming the secret. If the operator generated a token
+but hasn't yet pasted the hub-config snippet and reloaded, the endpoint
+returns `503` without redeeming anything — the same secret works once
+they finish, rather than being permanently burned by an early, doomed-to-fail
+attempt.
+
 ## Onboarding a spoke
 
 `cmd/acme-onboard` exists because hand-editing two separate YAML files (the

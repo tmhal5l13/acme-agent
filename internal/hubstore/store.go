@@ -27,7 +27,7 @@ type Store struct {
 // seeds a brand-new database with. Existing databases are brought up to it
 // by migrate, since CREATE TABLE IF NOT EXISTS (schema.sql's only tool) does
 // nothing for a table that already exists in an older shape.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // Open opens (creating if necessary) the SQLite database at path, applies
 // the schema, and migrates an existing database up to currentSchemaVersion
@@ -97,6 +97,18 @@ func migrate(db *sql.DB) error {
 		}
 		if _, err := db.Exec(`UPDATE schema_meta SET version = 3 WHERE id = 1`); err != nil {
 			return fmt.Errorf("record schema version 3: %w", err)
+		}
+	}
+
+	if version < 4 {
+		// No ALTER needed - enrollment_tokens is a wholly new table, and
+		// schema.sql's CREATE TABLE IF NOT EXISTS above already applies it
+		// identically whether this is a fresh database or one upgrading
+		// from an earlier version. This block exists purely to keep
+		// schema_meta.version's bookkeeping consistent with every other
+		// version bump.
+		if _, err := db.Exec(`UPDATE schema_meta SET version = 4 WHERE id = 1`); err != nil {
+			return fmt.Errorf("record schema version 4: %w", err)
 		}
 	}
 
