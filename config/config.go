@@ -105,13 +105,32 @@ type DNSProviderConfig struct {
 	// cloudflare
 	APIToken string `yaml:"api_token"`
 
-	// route53 (AWS). Deliberately no access key / secret fields: credentials
-	// come from the standard AWS SDK credential chain (environment
-	// variables, ~/.aws/credentials, or an IAM role) rather than this file,
-	// per AWS's own guidance against long-lived keys in application config.
-	// HostedZoneID and Region are optional overrides.
-	HostedZoneID string `yaml:"hosted_zone_id"`
-	Region       string `yaml:"region"`
+	// route53 (AWS). By default, credentials come from the standard AWS
+	// SDK credential chain (environment variables, ~/.aws/credentials, or
+	// an IAM role) rather than this file, per AWS's own guidance against
+	// long-lived keys in application config — leave AccessKeyID/
+	// SecretAccessKey/SessionToken unset to get that behavior, which is
+	// the recommended default and the only option for a single-account
+	// deployment.
+	//
+	// They exist as an explicit override for the case the SDK chain can't
+	// cover: more than one route53_* entry needing genuinely different
+	// AWS credentials (e.g. two separate AWS accounts' hosted zones
+	// managed from one hub) — the SDK chain resolves exactly one set of
+	// ambient credentials for the whole process, shared by every entry
+	// that doesn't override it. lego's route53 provider only uses these
+	// if both AccessKeyID and SecretAccessKey are set (SessionToken is
+	// optional, only meaningful for temporary/STS-issued credentials, and
+	// requires the other two to also be set).
+	//
+	// HostedZoneID and Region are optional overrides, independent of
+	// credentials - they apply regardless of which credential source is
+	// in effect for this entry.
+	AccessKeyID     string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
+	SessionToken    string `yaml:"session_token"`
+	HostedZoneID    string `yaml:"hosted_zone_id"`
+	Region          string `yaml:"region"`
 
 	// godaddy
 	APIKey    string `yaml:"api_key"`
