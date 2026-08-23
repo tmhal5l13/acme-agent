@@ -80,10 +80,15 @@ func (state *watchdogState) watchdogPass(ctx context.Context, s *Server) {
 		}
 	}
 
-	staleAfter := s.cfg.WatchdogStaleAfter.Duration()
+	// Loaded once for the whole pass, not once per field/loop - these two
+	// reads describe one logical unit of work (one scan) and should see a
+	// consistent snapshot even if a reload lands mid-pass, not staleAfter
+	// from one config and the spoke list from a newer one.
+	hs := s.state.Load()
+	staleAfter := hs.cfg.WatchdogStaleAfter.Duration()
 	now := time.Now()
 
-	for spokeID, spoke := range s.cfg.Spokes {
+	for spokeID, spoke := range hs.cfg.Spokes {
 		for _, cert := range spoke.Certs {
 			key := spokeID + "/" + cert.Name
 
@@ -127,7 +132,8 @@ func (state *watchdogState) watchdogPass(ctx context.Context, s *Server) {
 }
 
 func (state *watchdogState) notify(ctx context.Context, s *Server, spokeID, certName, reason string) {
-	if s.cfg.NotifyHook == "" {
+	cfg := s.state.Load().cfg
+	if cfg.NotifyHook == "" {
 		return
 	}
 	env := map[string]string{
@@ -137,13 +143,14 @@ func (state *watchdogState) notify(ctx context.Context, s *Server, spokeID, cert
 		"ACME_PREVIOUS_STATUS": "unknown",
 		"ACME_REASON":          reason,
 	}
-	if err := hook.RunWithEnv(ctx, s.cfg.NotifyHook, s.cfg.NotifyTimeout.Duration(), env); err != nil {
+	if err := hook.RunWithEnv(ctx, cfg.NotifyHook, cfg.NotifyTimeout.Duration(), env); err != nil {
 		slog.Error("watchdog notify hook failed", "spoke", spokeID, "name", certName, "error", err)
 	}
 }
 
 func (state *watchdogState) notifyRecovered(ctx context.Context, s *Server, spokeID, certName string) {
-	if s.cfg.NotifyHook == "" {
+	cfg := s.state.Load().cfg
+	if cfg.NotifyHook == "" {
 		return
 	}
 	env := map[string]string{
@@ -152,7 +159,7 @@ func (state *watchdogState) notifyRecovered(ctx context.Context, s *Server, spok
 		"ACME_STATUS":          "active",
 		"ACME_PREVIOUS_STATUS": "stale",
 	}
-	if err := hook.RunWithEnv(ctx, s.cfg.NotifyHook, s.cfg.NotifyTimeout.Duration(), env); err != nil {
+	if err := hook.RunWithEnv(ctx, cfg.NotifyHook, cfg.NotifyTimeout.Duration(), env); err != nil {
 		slog.Error("watchdog recovery notify hook failed", "spoke", spokeID, "name", certName, "error", err)
 	}
 }

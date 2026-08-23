@@ -232,6 +232,40 @@ Secrets for both binaries live in an `EnvironmentFile` (`acme-hub.env` /
 via `${VAR}` — never written into `config.yaml` itself, which is why that
 file can safely stay world-readable (`0644`).
 
+## Config hot-reload
+
+Sending the hub process `SIGHUP` (`kill -HUP $(pidof acme-hub)`, or
+`systemctl reload acme-hub`) re-reads `config.yaml` and applies it live —
+no restart, no dropped connections, no in-flight request affected.
+
+Only two things actually change this way: `spokes` and `dns_providers`
+(and everything derived from them — the token→spoke index, the
+`challenge.Provider` built per DNS provider). That's a deliberate, narrow
+scope, not a partial implementation of "reload everything": `listen_addr`,
+`tls_cert_file`/`tls_key_file`, `data_dir`, and `db_path` are all resources
+already bound at process start (a listening socket, an open database file)
+— `internal/hubapi` never reads any of them at all, only `cmd/acme-hub`
+does, once, before the `Server` is even constructed — so there's nothing
+for a reload to meaningfully change there short of a real restart.
+
+Internally, `hubapi.Server` bundles its config, token index, and DNS
+provider map into one `hubState` struct held behind an `atomic.Pointer` —
+every request handler loads it once per request and reads through that
+snapshot, so a reload landing mid-request can never leave a handler
+looking at, say, this reload's token index paired with the previous
+reload's config (the actual bug class this design rules out by
+construction, verified under `-race` with concurrent readers hammering the
+server while reloads happen in a loop). `Server.Reload` rebuilds the whole
+`hubState` from the new config and only swaps it in if that succeeds — a
+bad reload (e.g. a cert now referencing an unknown `dns_provider`) is
+logged and the prior state keeps serving untouched, never partially
+applied.
+
+This is what makes low-friction spoke enrollment (see "Onboarding a
+spoke") actually low-friction on the hub side too: adding a spoke no
+longer means restarting the hub, just pasting the generated snippet and
+sending one signal.
+
 ## Cross-platform builds
 
 All three binaries are pure Go (no cgo — `modernc.org/sqlite` was chosen
@@ -925,14 +959,20 @@ The manual rotation procedure:
   ACME server, including the full spoke↔hub↔CA relay path), `internal/hook`,
   and `internal/dnsprovider`. `internal/store` has some coverage now too
   (WAL/busy_timeout takes effect, `GetAccount`'s not-found path) but far
-  less than `internal/hubstore`'s. Everything else — the remaining
-  `internal/store` surface and all three `cmd/` binaries — has been
-  verified only by running real binaries against real infrastructure (a
-  real Route53 zone, Let's Encrypt staging) during development, not by
-  `go test`.
-- **No hot-reload.** Both `acme-onboard` output and a hand-edit alike
-  require restarting the hub to take effect — config is loaded once at
-  startup.
+  less than `internal/hubstore`'s. `cmd/acme-hub` has targeted coverage for
+  `ensureTLS` (SAN correctness including the wildcard-`listen_addr`
+  fallback) and `watchForReload` (a real self-sent `SIGHUP` against a real
+  `hubapi.Server`, proving the signal plumbing itself works, not just
+  `Server.Reload` in isolation) — everything else, the remaining
+  `internal/store` surface, and `cmd/acme-spoke`/`cmd/acme-onboard` in
+  full, has been verified only by running real binaries against real
+  infrastructure (a real Route53 zone, Let's Encrypt staging) during
+  development, not by `go test`.
+- **Hot-reload is partial, not total.** See "Config hot-reload" above —
+  `spokes` and `dns_providers` apply live via `SIGHUP`, but `listen_addr`,
+  the TLS cert paths, `data_dir`, and `db_path` still require a real
+  restart, since they're resources already bound at process start that
+  nothing in `internal/hubapi` ever re-reads anyway.
 - **Behavior at high spoke counts is unverified.** Two concentration
   points exist by design, both worth naming explicitly rather than
   leaving implicit: `internal/hubstore`'s SQLite backend serializes

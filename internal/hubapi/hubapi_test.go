@@ -50,7 +50,13 @@ func newTestServer(t *testing.T, cfg *config.HubConfig, providers map[string]cha
 		}
 	}
 
-	return &Server{cfg: cfg, store: st, tokenToSpoke: tokenToSpoke, dnsProviders: providers}
+	s := &Server{store: st}
+	// Built directly rather than via buildState, which would try to
+	// construct real challenge.Provider values from cfg.DNSProviders -
+	// tests pass in fakes instead (see fakeDNSProvider), so the state's
+	// dnsProviders map is exactly what the caller gave it.
+	s.state.Store(&hubState{cfg: cfg, tokenToSpoke: tokenToSpoke, dnsProviders: providers})
+	return s
 }
 
 // testConfig is one spoke ("spoke-a", token "token-a") authorized for one

@@ -169,7 +169,8 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 // never more, and never blocks other requests (Go's http.Server handles
 // each concurrently).
 func (s *Server) notifyIfTransitioned(ctx context.Context, spokeID, certName, previousStatus string, req checkinRequest, notAfter time.Time) {
-	if s.cfg.NotifyHook == "" {
+	cfg := s.state.Load().cfg
+	if cfg.NotifyHook == "" {
 		return
 	}
 
@@ -187,7 +188,7 @@ func (s *Server) notifyIfTransitioned(ctx context.Context, spokeID, certName, pr
 		"ACME_ERROR":           req.Error,
 		"ACME_NOT_AFTER":       notAfter.Format(time.RFC3339),
 	}
-	if err := hook.RunWithEnv(ctx, s.cfg.NotifyHook, s.cfg.NotifyTimeout.Duration(), env); err != nil {
+	if err := hook.RunWithEnv(ctx, cfg.NotifyHook, cfg.NotifyTimeout.Duration(), env); err != nil {
 		slog.Error("notify hook failed", "spoke", spokeID, "name", certName, "error", err)
 	}
 }
@@ -222,19 +223,21 @@ func (s *Server) handleDue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg := s.state.Load().cfg
+
 	renewBefore := cert.RenewBefore.Duration()
 	if renewBefore == 0 {
-		renewBefore = s.cfg.ACMEDefaults.RenewBefore.Duration()
+		renewBefore = cfg.ACMEDefaults.RenewBefore.Duration()
 	}
 	// Jitter only ever widens the renewal window (renews *earlier*, never
 	// later), so it can't erode the safety margin renewBefore guarantees —
 	// see jitterFor and ACMEDefaultsConfig.RenewalJitter.
-	renewBefore += jitterFor(spokeID, cert.Name, s.cfg.ACMEDefaults.RenewalJitter.Duration())
+	renewBefore += jitterFor(spokeID, cert.Name, cfg.ACMEDefaults.RenewalJitter.Duration())
 
-	state, err := s.store.Get(spokeID, cert.Name)
+	certState, err := s.store.Get(spokeID, cert.Name)
 	due := true // never checked in for this cert => nothing issued yet => due
 	if err == nil {
-		due = !state.NotAfter.Valid || time.Until(state.NotAfter.Time) < renewBefore
+		due = !certState.NotAfter.Valid || time.Until(certState.NotAfter.Time) < renewBefore
 	} else if !errors.Is(err, hubstore.ErrNotFound) {
 		slog.Error("due check", "spoke", spokeID, "name", cert.Name, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -242,7 +245,7 @@ func (s *Server) handleDue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if due {
-		claimed, err := s.store.Claim(spokeID, cert.Name, s.cfg.RenewalLeaseDuration.Duration())
+		claimed, err := s.store.Claim(spokeID, cert.Name, cfg.RenewalLeaseDuration.Duration())
 		if err != nil {
 			slog.Error("claim renewal lease", "spoke", spokeID, "name", cert.Name, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
