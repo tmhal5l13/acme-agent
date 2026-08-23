@@ -141,6 +141,14 @@ func (s *Server) Handler() http.Handler {
 	if s.state.Load().cfg.StatusToken != "" {
 		mux.HandleFunc("GET /v1/status", s.handleStatus)
 		mux.HandleFunc("GET /admin", s.handleAdminDashboard)
+		mux.HandleFunc("POST /admin/spokes", s.handleAdminCreateSpoke)
+		mux.HandleFunc("POST /admin/spokes/{id}/delete", s.handleAdminDeleteSpoke)
+		mux.HandleFunc("POST /admin/spokes/{id}/tokens", s.handleAdminAddSpokeToken)
+		mux.HandleFunc("POST /admin/spokes/{id}/tokens/delete", s.handleAdminRemoveSpokeToken)
+		mux.HandleFunc("POST /admin/spokes/{id}/certs", s.handleAdminUpsertSpokeCert)
+		mux.HandleFunc("POST /admin/spokes/{id}/certs/{name}/delete", s.handleAdminRemoveSpokeCert)
+		mux.HandleFunc("POST /admin/dns-providers", s.handleAdminUpsertDNSProvider)
+		mux.HandleFunc("POST /admin/dns-providers/{name}/delete", s.handleAdminRemoveDNSProvider)
 	}
 	return mux
 }

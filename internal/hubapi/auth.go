@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/tmhal5l13/acme-agent/config"
@@ -85,6 +86,29 @@ func authorizeAdmin(w http.ResponseWriter, r *http.Request, state *hubState) boo
 		subtle.ConstantTimeCompare([]byte(password), []byte(state.cfg.StatusToken)) != 1 {
 		w.Header().Set("WWW-Authenticate", `Basic realm="acme-hub admin"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// requireSameOrigin rejects a state-changing request whose Origin header's
+// host doesn't match r.Host (what the browser actually dialed) - CSRF
+// defense for POST /admin/*. No session or signed token needed: a
+// cross-origin page cannot forge this header to match, since the browser
+// itself sets Origin based on the page that initiated the request, not
+// anything script-controlled. A missing Origin is rejected, not passed
+// through - a real same-origin form POST always sends one on
+// state-changing methods per the Fetch spec, so its absence means
+// something other than a normal browser submission.
+func requireSameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		http.Error(w, "missing Origin header", http.StatusForbidden)
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host != r.Host {
+		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 		return false
 	}
 	return true

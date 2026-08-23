@@ -873,44 +873,78 @@ browser rather than a monitoring tool — is available at `GET /admin`; see
 
 ## Web admin UI
 
-`GET /admin` serves a read-only, server-rendered HTML page with the exact
-same fleet-wide certificate data `GET /v1/status` reports as JSON — both
-handlers share `internal/hubapi.adminEntries`, the merge-observed-with-
-desired-state logic factored out of `handleStatus`, so the two views can
-never structurally diverge on what counts as "configured" or "unknown."
+`GET /admin` serves a server-rendered HTML page combining the same
+fleet-wide certificate data `GET /v1/status` reports as JSON (both
+handlers share `internal/hubapi.adminEntries`, so the two views can never
+structurally diverge on what counts as "configured" or "unknown") with
+full write access to desired state: create/delete a spoke, rotate its
+tokens, add/edit/remove its certificates, and create/update/remove DNS
+providers — the actual point of moving desired state into the database
+(see "Database-backed desired state" above).
 
 Gated by the same `status_token` as `/v1/status` (registered in the same
-`Handler()` conditional, so leaving `status_token` unset disables both
-endpoints identically — 404, not 401, when unconfigured), but presented
-differently: `/admin` uses HTTP Basic Auth (`internal/hubapi.authorizeAdmin`)
-rather than a bearer header, since a browser needs a native credential
-prompt to open the page directly — unlike `handleStatus`'s check, a failed
-attempt here sets `WWW-Authenticate: Basic realm="acme-hub admin"`, which
-is what actually triggers that prompt. The username field is ignored;
-`status_token` is the password. Basic Auth over a login-form/session-cookie
-was a deliberate choice, not just the simplest option: browsers resend
-cached Basic Auth credentials automatically on every subsequent
-same-origin request, including future `POST`s — the property that lets a
-later write-capable phase (see below) reuse this exact auth mechanism
-without new session infrastructure.
+`Handler()` conditional, so leaving `status_token` unset disables every
+`/admin` route identically — 404, not 401, when unconfigured), but
+presented differently: `/admin` uses HTTP Basic Auth
+(`internal/hubapi.authorizeAdmin`) rather than a bearer header, since a
+browser needs a native credential prompt to open the page directly —
+a failed attempt sets `WWW-Authenticate: Basic realm="acme-hub admin"`,
+which is what actually triggers that prompt. The username field is
+ignored; `status_token` is the password. Basic Auth over a login-form/
+session-cookie was a deliberate choice, not just the simplest option:
+browsers resend cached Basic Auth credentials automatically on every
+subsequent same-origin request, including `POST`s — the property that
+let the write endpoints reuse this exact auth mechanism without any new
+session infrastructure when they were added.
 
-The page is plain HTML rendered via Go's `html/template` (not
+The dashboard is plain HTML rendered via Go's `html/template` (not
 `text/template` — load-bearing, since it auto-escapes fields that can
-carry spoke-reported text, like a checkin's error string) from an inline
-template constant in `internal/hubapi/admin.go`, with no JavaScript at
-all: it re-fetches itself every 30s via `<meta http-equiv="refresh">`
-rather than polling from client-side JS, so this phase has no fetch/JS
-surface that would ever need to hold the auth credential itself.
+carry spoke-reported text, like a checkin's error string) from inline
+template constants in `internal/hubapi/admin.go`. Every write is a plain
+HTML form `POST` — no client-side fetch, so nothing but the browser's own
+cached Basic Auth credential is ever involved in a write; the dashboard
+itself still re-fetches via `<meta http-equiv="refresh">` rather than
+polling. A few destructive actions (remove a spoke/token/provider) use a
+plain inline `onclick="confirm(...)"` as a safety prompt — it never
+touches auth or the network, only whether the browser's normal form
+submission proceeds, and degrades harmlessly (submits unconfirmed) with
+JS disabled.
 
-**Future growth.** This phase is deliberately read-only. Write actions
-(add a spoke, rotate a token, trigger a config reload) would extend this
-the same way the API itself is built — narrow, purpose-built `POST
-/admin/...` handlers (matching the existing `/v1/certs/{name}/dns01/present`-style
-precedent over a generic REST surface) reusing `authorizeAdmin` unchanged,
-since Basic Auth credentials already carry over to `POST`s with no new
-auth work. Whether `status_token`/`StatusToken` should be renamed (e.g.
-`admin_token`) once it grants mutation, not just read access, is an open
-question for that future work — deliberately not resolved here.
+**CSRF defense: `Origin` header validation**
+(`internal/hubapi.requireSameOrigin`). Every `POST /admin/...` request
+must carry an `Origin` header whose host matches `r.Host` (what the
+browser actually dialed) — missing or mismatched is rejected outright.
+No session, no signed per-form token: a cross-origin page has no way to
+forge this header to match, since the browser itself sets it based on
+the page that initiated the request, not anything script-controlled.
+This is the same "lightest mechanism that actually closes the real gap"
+judgment `authorize`'s own doc comment makes for per-spoke tokens (a map
+lookup, not a constant-time-compare loop) — a signed-token scheme would
+need session state this design has deliberately avoided everywhere else.
+
+**Write endpoints** (`internal/hubapi/admin_write.go`), all under the
+same `/admin` prefix and `authorizeAdmin`/`requireSameOrigin` guard
+(`Server.adminWriteGuard`): `POST /admin/spokes` (create — the one
+endpoint that doesn't redirect to `/admin`, since the freshly generated
+token is only ever shown once, on a dedicated confirmation page — see
+`renderAdminNewTokenPage`), `POST /admin/spokes/{id}/delete`,
+`POST /admin/spokes/{id}/tokens` (add — rotation step 1, same one-time
+token page), `POST /admin/spokes/{id}/tokens/delete` (remove — rotation
+step 2, refused by the store if it's the spoke's last token),
+`POST /admin/spokes/{id}/certs` (upsert — the same endpoint doubles as
+create and edit), `POST /admin/spokes/{id}/certs/{name}/delete`,
+`POST /admin/dns-providers` (create/update — the form posts every
+possible per-type field regardless of which type is selected; unused
+ones for a given type are simply ignored), and
+`POST /admin/dns-providers/{name}/delete`. Every handler calls
+`Server.Reload` itself, synchronously, immediately after its own store
+write — a browser action is live on the very next request, no `SIGHUP`
+involved (see "Config hot-reload" above on why that's specifically true
+for this in-process writer and not for a separate CLI process).
+
+Whether `status_token`/`StatusToken` should eventually be renamed (e.g.
+`admin_token`) now that it grants mutation, not just read access, remains
+an open, low-priority question — deferred, not resolved here.
 
 ## Hub-side staleness watchdog
 
