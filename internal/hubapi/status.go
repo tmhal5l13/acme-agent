@@ -37,15 +37,17 @@ type statusEntry struct {
 // appears - as status "unknown", the same default hubstore itself uses -
 // rather than silently missing from the response entirely.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	state := s.state.Load()
+
 	token, ok := bearerToken(r)
 	// subtle.ConstantTimeCompare here (unlike authorize's plain map
 	// lookup for per-spoke tokens) because there's exactly one valid
 	// value to compare against, not a set to look up in - a direct
-	// token == s.cfg.StatusToken comparison is exactly the byte-by-byte
+	// token == state.cfg.StatusToken comparison is exactly the byte-by-byte
 	// shape that leaks timing information about how much of the prefix
 	// matched, which is the actual case this primitive exists for.
-	if !ok || len(token) != len(s.cfg.StatusToken) ||
-		subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.StatusToken)) != 1 {
+	if !ok || len(token) != len(state.cfg.StatusToken) ||
+		subtle.ConstantTimeCompare([]byte(token), []byte(state.cfg.StatusToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -61,7 +63,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var entries []statusEntry
-	for spokeID, spoke := range s.cfg.Spokes {
+	for spokeID, spoke := range state.cfg.Spokes {
 		for _, cert := range spoke.Certs {
 			cs, ok := byKey[spokeID+"/"+cert.Name]
 			if !ok {

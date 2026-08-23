@@ -42,13 +42,15 @@ func (s *Server) authorize(r *http.Request) (spokeID string, cert config.SpokeCe
 		return "", config.SpokeCertConfig{}, errUnauthorized
 	}
 
-	spokeID, ok = s.tokenToSpoke[token]
+	state := s.state.Load()
+
+	spokeID, ok = state.tokenToSpoke[token]
 	if !ok {
 		return "", config.SpokeCertConfig{}, errUnauthorized
 	}
 
 	name := r.PathValue("name")
-	for _, c := range s.cfg.Spokes[spokeID].Certs {
+	for _, c := range state.cfg.Spokes[spokeID].Certs {
 		if c.Name == name {
 			return spokeID, c, nil
 		}

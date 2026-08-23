@@ -63,8 +63,10 @@ func (s *Server) handleDNS01(w http.ResponseWriter, r *http.Request, do func(cha
 		return
 	}
 
+	state := s.state.Load()
+
 	providerName := resolveDNSProvider(cert, req.Domain)
-	provider, ok := s.dnsProviders[providerName]
+	provider, ok := state.dnsProviders[providerName]
 	if !ok {
 		// Config validation at load time already guarantees every cert's
 		// dns_provider (and every domain_dns_providers override) references
@@ -75,7 +77,7 @@ func (s *Server) handleDNS01(w http.ResponseWriter, r *http.Request, do func(cha
 		return
 	}
 
-	if err := withTimeout(s.cfg.DNSProviderTimeout.Duration(), func() error { return do(provider, req) }); err != nil {
+	if err := withTimeout(state.cfg.DNSProviderTimeout.Duration(), func() error { return do(provider, req) }); err != nil {
 		slog.Error("dns01 request failed", "spoke", spokeID, "cert", cert.Name, "domain", req.Domain, "error", err)
 		http.Error(w, "dns provider request failed", http.StatusBadGateway)
 		return

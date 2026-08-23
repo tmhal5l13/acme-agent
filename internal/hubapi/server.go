@@ -6,6 +6,7 @@ package hubapi
 import (
 	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/go-acme/lego/v4/challenge"
 
@@ -14,22 +15,33 @@ import (
 	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
 
-// Server holds everything request handlers need: the hub's desired-state
-// config, its observed-state store, a token->spoke index, and one
-// challenge.Provider per named entry in config's dns_providers — all built
-// once at startup rather than reconstructed per request.
-type Server struct {
+// hubState is every piece of desired-state a request handler reads,
+// bundled into one struct so a config reload (see Reload) always swaps
+// all three together — a handler that loads this once at the top of a
+// request can never observe tokenToSpoke from a newer reload paired with
+// cfg from an older one, or vice versa, the torn-state bug this bundling
+// exists to rule out by construction.
+type hubState struct {
 	cfg          *config.HubConfig
-	store        *hubstore.Store
 	tokenToSpoke map[string]string
 	dnsProviders map[string]challenge.Provider
 }
 
-// NewServer builds a Server, its token index, and its DNS providers from
-// cfg. Building every configured DNS provider up front means a bad
-// provider config (e.g. an unknown type) is caught at startup, not on the
-// first request that happens to need it.
-func NewServer(cfg *config.HubConfig, store *hubstore.Store) (*Server, error) {
+// Server holds everything request handlers need: the hub's desired-state
+// (behind state, reloadable — see Reload) and its observed-state store
+// (never reloaded; hubstore.Store manages its own connection for the
+// process lifetime).
+type Server struct {
+	state atomic.Pointer[hubState]
+	store *hubstore.Store
+}
+
+// buildState builds a hubState from cfg: its token->spoke index and one
+// challenge.Provider per named entry in config's dns_providers. Building
+// every configured DNS provider up front means a bad provider config
+// (e.g. an unknown type) is caught here — at startup, or at Reload time —
+// not on the first request that happens to need it.
+func buildState(cfg *config.HubConfig) (*hubState, error) {
 	tokenToSpoke := make(map[string]string, len(cfg.Spokes))
 	for spokeID, spoke := range cfg.Spokes {
 		// One entry per token, all pointing at the same spoke - this is
@@ -49,12 +61,42 @@ func NewServer(cfg *config.HubConfig, store *hubstore.Store) (*Server, error) {
 		dnsProviders[name] = provider
 	}
 
-	return &Server{
+	return &hubState{
 		cfg:          cfg,
-		store:        store,
 		tokenToSpoke: tokenToSpoke,
 		dnsProviders: dnsProviders,
 	}, nil
+}
+
+// NewServer builds a Server from cfg and store — see buildState for what
+// "building" means.
+func NewServer(cfg *config.HubConfig, store *hubstore.Store) (*Server, error) {
+	state, err := buildState(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Server{store: store}
+	s.state.Store(state)
+	return s, nil
+}
+
+// Reload rebuilds hubState from cfg and swaps it in atomically — see
+// ARCHITECTURE.md "Config hot-reload" for exactly what's reloadable this
+// way (spokes, dns_providers) versus what still needs a real restart
+// (listen_addr, TLS cert paths, data_dir, db_path — resources already
+// bound at process start, which no handler here ever reads anyway).
+//
+// On error, the prior state is left serving untouched — a bad new config
+// (e.g. a cert now referencing an unknown dns_provider) must never
+// partially apply.
+func (s *Server) Reload(cfg *config.HubConfig) error {
+	state, err := buildState(cfg)
+	if err != nil {
+		return err
+	}
+	s.state.Store(state)
+	return nil
 }
 
 // Handler returns the routed HTTP handler for the hub's API.
@@ -68,7 +110,11 @@ func (s *Server) Handler() http.Handler {
 	// HubConfig.StatusToken's doc comment. Registering it unconditionally
 	// and rejecting every request when the token is empty would work too,
 	// but not existing is a clearer signal than a route that 401s forever.
-	if s.cfg.StatusToken != "" {
+	// Checked once here, not through state.Load() - StatusToken is
+	// deliberately not part of the hot-reloadable field set (see "Config
+	// hot-reload" in ARCHITECTURE.md), so this matches every other
+	// startup-only setting.
+	if s.state.Load().cfg.StatusToken != "" {
 		mux.HandleFunc("GET /v1/status", s.handleStatus)
 	}
 	return mux

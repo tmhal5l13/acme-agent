@@ -103,6 +103,8 @@ func run() error {
 	// latency well under the staleness threshold itself.
 	go server.RunWatchdog(ctx, watchdogScanInterval)
 
+	go watchForReload(ctx, *configPath, server)
+
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("acme-hub listening", "addr", cfg.ListenAddr, "tls_cert", cfg.TLSCertFile)
@@ -124,6 +126,43 @@ func run() error {
 	}
 
 	return nil
+}
+
+// watchForReload re-reads configPath and applies it to server on every
+// SIGHUP, until ctx is cancelled. This is a separate signal.Notify loop
+// rather than reusing run's signal.NotifyContext for interrupt/SIGTERM:
+// NotifyContext cancels a context once and is done, which is exactly
+// wrong for a signal meant to be handled repeatedly for the life of the
+// process (the standard reload-on-SIGHUP pattern many daemons use, e.g.
+// nginx). A failed reload (bad YAML, a cert referencing an unknown
+// dns_provider, ...) is logged and otherwise ignored - see
+// hubapi.Server.Reload's doc comment for why it never partially applies
+// a bad config, only cleanly rejects it. Only config.HubConfig fields
+// hubapi.Server actually reads (spokes, dns_providers) take effect this
+// way; listen_addr, TLS cert paths, data_dir, and db_path still need a
+// real restart - see ARCHITECTURE.md "Config hot-reload".
+func watchForReload(ctx context.Context, configPath string, server *hubapi.Server) {
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	defer signal.Stop(sighup)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sighup:
+			cfg, err := config.LoadHubConfig(configPath)
+			if err != nil {
+				slog.Error("reload: load config", "error", err)
+				continue
+			}
+			if err := server.Reload(cfg); err != nil {
+				slog.Error("reload: apply config", "error", err)
+				continue
+			}
+			slog.Info("reloaded config", "path", configPath)
+		}
+	}
 }
 
 const (
