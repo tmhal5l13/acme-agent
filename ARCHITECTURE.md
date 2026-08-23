@@ -1168,9 +1168,19 @@ The manual rotation procedure:
   environment, so multiple distinct credential sets for those providers
   work without any of this.
 - **CA flexibility (`directory_url`, `ca_cert_file`, EAB — see "ACME CA
-  flexibility" above) is implemented but has never been exercised against
-  a real non-Let's-Encrypt CA.** Every live test in this project's history
-  has used Let's Encrypt staging. The new code paths (custom directory
-  URL, private-CA transport trust, `RegisterWithExternalAccountBinding`)
-  are unit-tested in isolation, but nothing has actually registered an
-  account or issued a certificate against a second CA end-to-end.
+  flexibility" above) is only partly exercised end-to-end.** EAB
+  (`RegisterWithExternalAccountBinding`, `config.ACMEConfig.EABKeyID`/
+  `EABHMACKey`) now has real coverage: `internal/acmeclient`'s
+  `TestPebble_EABRegistration` runs pebble itself with
+  `externalAccountBindingRequired` set and its own fixed test MAC keys
+  (real values from pebble's own
+  `test/config/pebble-config-external-account-bindings.json`, not
+  invented here), proving a real registration succeeds with a valid EAB
+  and — the actual enforcement check, not just a happy-path pass — that
+  the same request without one is rejected. `directory_url`/`ca_cert_file`
+  (pointing at a genuinely different CA, not just a different directory
+  URL for the same server) remain unverified: pebble only ever presents
+  one directory of its own, so this needs a second real ACME server (or a
+  real non-Let's-Encrypt CA) to close, and every live test in this
+  project's history besides the new EAB one has used Let's Encrypt
+  staging or pebble.

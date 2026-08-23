@@ -123,6 +123,56 @@ func TestPebble_IssueAndRenew(t *testing.T) {
 	}
 }
 
+// TestPebble_EABRegistration proves GetOrRegisterAccount's
+// RegisterWithExternalAccountBinding path (config.ACMEConfig.EABKeyID/
+// EABHMACKey, wired in internal/acmeclient/account.go's registerAccount)
+// actually succeeds against a CA that enforces EAB, not just that it's
+// unit-tested in isolation - closes the "CA flexibility ... never exercised"
+// known gap for the EAB piece specifically. Pebble only ever presents one
+// directory, so this still can't cover directory_url/ca_cert_file against a
+// genuinely different CA - only EAB.
+func TestPebble_EABRegistration(t *testing.T) {
+	requirePebbleE2E(t)
+	caCertFile := startPebbleWithEAB(t)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	acmeCfg := config.ACMEConfig{
+		DirectoryURL: pebbleDirectoryURL,
+		CACertFile:   caCertFile,
+		Email:        "test@example.com",
+		EABKeyID:     pebbleEABKeyID,
+		EABHMACKey:   pebbleEABHMACKey,
+	}
+
+	user, err := GetOrRegisterAccount(st, pebbleDirectoryURL, acmeCfg)
+	if err != nil {
+		t.Fatalf("GetOrRegisterAccount with EAB: %v", err)
+	}
+	if user.Registration == nil || user.Registration.URI == "" {
+		t.Fatal("got a user with no registration URI after a successful EAB registration")
+	}
+
+	// Proves pebble is actually enforcing EAB in this test (not silently
+	// accepting registrations either way): a request without EAB against
+	// the same EAB-required pebble instance must be rejected.
+	noEABCfg := acmeCfg
+	noEABCfg.EABKeyID = ""
+	noEABCfg.EABHMACKey = ""
+	st2, err := store.Open(filepath.Join(t.TempDir(), "test2.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st2.Close()
+	if _, err := GetOrRegisterAccount(st2, pebbleDirectoryURL, noEABCfg); err == nil {
+		t.Fatal("GetOrRegisterAccount without EAB against an EAB-required pebble: expected an error, got nil")
+	}
+}
+
 // parseCertTimesForTest mirrors internal/spokeagent's parseCertTimes
 // closely enough for this test's purposes, kept local rather than
 // exported from spokeagent to avoid a cross-package test-only dependency
