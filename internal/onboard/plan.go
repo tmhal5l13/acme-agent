@@ -55,23 +55,51 @@ type Result struct {
 	SpokeConfigYAML string // this spoke's complete config.yaml
 }
 
+// validateCertRequest checks the fields common to onboarding a
+// certificate onto a spoke regardless of which flow is doing it (Plan's
+// full hand-paste workflow, or PlanEnrollment's token-based one): a spoke
+// id, cert name, at least one domain, and that dnsProvider (and any
+// domainDNSProviders override) actually exists in the hub's config.
+func validateCertRequest(hubCfg *config.HubConfig, spokeID, certName string, domains []string, dnsProvider string, domainDNSProviders map[string]string) error {
+	if spokeID == "" {
+		return fmt.Errorf("spoke id is required")
+	}
+	if certName == "" {
+		return fmt.Errorf("cert name is required")
+	}
+	if len(domains) == 0 {
+		return fmt.Errorf("at least one domain is required")
+	}
+	if dnsProvider == "" {
+		return fmt.Errorf("dns provider is required")
+	}
+	if _, ok := hubCfg.DNSProviders[dnsProvider]; !ok {
+		return fmt.Errorf("dns_provider %q is not defined in the hub's config under dns_providers — add it there first", dnsProvider)
+	}
+
+	domainSet := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		domainSet[d] = true
+	}
+	for domain, provider := range domainDNSProviders {
+		if !domainSet[domain] {
+			return fmt.Errorf("domain_dns_providers references domain %q, which is not in Domains", domain)
+		}
+		if _, ok := hubCfg.DNSProviders[provider]; !ok {
+			return fmt.Errorf("domain_dns_providers[%s]: dns_provider %q is not defined in the hub's config under dns_providers — add it there first", domain, provider)
+		}
+	}
+	return nil
+}
+
 // Plan validates req against the hub's current config — spoke/cert name
 // collisions, and that DNSProvider actually exists — and produces a
 // Result. A new spoke gets a fresh cryptographically random token; adding
 // a certificate to a spoke that already exists reuses its existing token
 // rather than generating (and thereby invalidating) a new one.
 func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
-	if req.SpokeID == "" {
-		return nil, fmt.Errorf("spoke id is required")
-	}
-	if req.CertName == "" {
-		return nil, fmt.Errorf("cert name is required")
-	}
-	if len(req.Domains) == 0 {
-		return nil, fmt.Errorf("at least one domain is required")
-	}
-	if req.DNSProvider == "" {
-		return nil, fmt.Errorf("dns provider is required")
+	if err := validateCertRequest(hubCfg, req.SpokeID, req.CertName, req.Domains, req.DNSProvider, req.DomainDNSProviders); err != nil {
+		return nil, err
 	}
 	if req.HubURL == "" {
 		return nil, fmt.Errorf("hub url is required")
@@ -81,22 +109,6 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 	}
 	if req.ACMEEnv != "staging" && req.ACMEEnv != "production" {
 		return nil, fmt.Errorf("acme environment must be %q or %q, got %q", "staging", "production", req.ACMEEnv)
-	}
-	if _, ok := hubCfg.DNSProviders[req.DNSProvider]; !ok {
-		return nil, fmt.Errorf("dns_provider %q is not defined in the hub's config under dns_providers — add it there first", req.DNSProvider)
-	}
-
-	domainSet := make(map[string]bool, len(req.Domains))
-	for _, d := range req.Domains {
-		domainSet[d] = true
-	}
-	for domain, provider := range req.DomainDNSProviders {
-		if !domainSet[domain] {
-			return nil, fmt.Errorf("domain_dns_providers references domain %q, which is not in Domains", domain)
-		}
-		if _, ok := hubCfg.DNSProviders[provider]; !ok {
-			return nil, fmt.Errorf("domain_dns_providers[%s]: dns_provider %q is not defined in the hub's config under dns_providers — add it there first", domain, provider)
-		}
 	}
 
 	existing, spokeExists := hubCfg.Spokes[req.SpokeID]
@@ -206,6 +218,90 @@ func buildSpokeConfigYAML(req Request, existingCerts []config.SpokeCertConfig) s
 		fmt.Fprintf(&b, "    # reload_hook: \"systemctl reload nginx\"\n")
 	}
 	return b.String()
+}
+
+// EnrollmentRequest describes the certificate being enrolled for a
+// brand-new spoke via acme-hub --generate-token. Unlike Request, it never
+// describes an already-existing spoke (see PlanEnrollment) and carries
+// none of the spoke-local generation concerns (ACME email/environment,
+// reload hook) - those are supplied directly to acme-spoke --load-token
+// at enrollment time instead, since PlanEnrollment never generates a
+// spoke config.yaml itself; that only happens once the spoke actually
+// redeems its token against POST /v1/enroll.
+type EnrollmentRequest struct {
+	SpokeID            string
+	CertName           string
+	Domains            []string
+	DNSProvider        string
+	DomainDNSProviders map[string]string
+	// HubURL is where the new spoke will dial to reach the hub - embedded
+	// directly in the printed enrollment token (see internal/enrolltoken),
+	// not just the hub-config snippet, so acme-spoke --load-token needs
+	// nothing beyond that one token string.
+	HubURL string
+}
+
+// EnrollmentPlan is what PlanEnrollment generates for the operator to
+// apply and hand off.
+type EnrollmentPlan struct {
+	// BearerToken is the new spoke's real, permanent bearer token -
+	// stored (via hubstore.Store.InsertEnrollmentToken, by the caller,
+	// not by PlanEnrollment itself) alongside EnrollmentSecret, and handed
+	// back to the spoke only once it successfully redeems that secret.
+	BearerToken string
+	// EnrollmentSecret is the one-time secret to insert into hubstore
+	// (see internal/hubstore.Store.InsertEnrollmentToken) and embed in
+	// the token handed to the new spoke - see internal/enrolltoken.
+	EnrollmentSecret string
+	// HubEnvVarName is the ${VAR} name referenced in HubConfigYAML.
+	HubEnvVarName string
+	// HubConfigYAML is the snippet to paste into the hub's config.yaml -
+	// same shape Plan produces for a brand-new spoke.
+	HubConfigYAML string
+}
+
+// PlanEnrollment validates req against the hub's current config and
+// produces an EnrollmentPlan - see ARCHITECTURE.md "Spoke enrollment" for
+// the full workflow this is one step of. Unlike Plan, which reuses an
+// existing spoke's token when adding another certificate, PlanEnrollment
+// requires req.SpokeID to not already exist: enrolling an already-known
+// spoke isn't this function's job — add a certificate to it with Plan, or
+// rotate its token with PlanRotation.
+func PlanEnrollment(hubCfg *config.HubConfig, req EnrollmentRequest) (*EnrollmentPlan, error) {
+	if err := validateCertRequest(hubCfg, req.SpokeID, req.CertName, req.Domains, req.DNSProvider, req.DomainDNSProviders); err != nil {
+		return nil, err
+	}
+	if req.HubURL == "" {
+		return nil, fmt.Errorf("hub url is required")
+	}
+	if _, exists := hubCfg.Spokes[req.SpokeID]; exists {
+		return nil, fmt.Errorf("spoke %q already exists in the hub's config — PlanEnrollment is for brand-new spokes only; use Plan to add a certificate to an existing spoke, or PlanRotation to rotate its token", req.SpokeID)
+	}
+
+	bearerToken, err := GenerateToken()
+	if err != nil {
+		return nil, err
+	}
+	secret, err := GenerateToken()
+	if err != nil {
+		return nil, err
+	}
+
+	envVar := envVarName(req.SpokeID)
+	snippetReq := Request{
+		SpokeID:            req.SpokeID,
+		CertName:           req.CertName,
+		Domains:            req.Domains,
+		DNSProvider:        req.DNSProvider,
+		DomainDNSProviders: req.DomainDNSProviders,
+	}
+
+	return &EnrollmentPlan{
+		BearerToken:      bearerToken,
+		EnrollmentSecret: secret,
+		HubEnvVarName:    envVar,
+		HubConfigYAML:    buildHubConfigYAML(snippetReq, envVar, true),
+	}, nil
 }
 
 // RotationRequest identifies the spoke whose bearer token is being

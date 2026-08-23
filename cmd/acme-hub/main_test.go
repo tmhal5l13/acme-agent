@@ -1,18 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"net/http/httptest"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/enrolltoken"
 	"github.com/tmhal5l13/acme-agent/internal/hubapi"
 	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
@@ -206,5 +210,178 @@ func TestWatchForReload_PicksUpSIGHUP(t *testing.T) {
 			t.Fatalf("spoke-b still not authorized 2s after SIGHUP, last status %d", rec.Code)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestParseDomainDNSProviders_Empty(t *testing.T) {
+	m, err := parseDomainDNSProviders("")
+	if err != nil {
+		t.Fatalf("parseDomainDNSProviders: %v", err)
+	}
+	if m != nil {
+		t.Errorf("got %v, want nil for an empty string", m)
+	}
+}
+
+func TestParseDomainDNSProviders_ParsesMultiplePairs(t *testing.T) {
+	m, err := parseDomainDNSProviders("a.example.com=cloudflare_main,b.example.com=route53_main")
+	if err != nil {
+		t.Fatalf("parseDomainDNSProviders: %v", err)
+	}
+	want := map[string]string{"a.example.com": "cloudflare_main", "b.example.com": "route53_main"}
+	if len(m) != len(want) {
+		t.Fatalf("got %v, want %v", m, want)
+	}
+	for k, v := range want {
+		if m[k] != v {
+			t.Errorf("got %s=%q, want %q", k, m[k], v)
+		}
+	}
+}
+
+func TestParseDomainDNSProviders_RejectsMalformedPair(t *testing.T) {
+	if _, err := parseDomainDNSProviders("not-a-valid-pair"); err == nil {
+		t.Fatal("expected an error for a pair with no '=', got nil")
+	}
+}
+
+func TestDefaultHubURL_UsesListenAddrWhenNoTLSHost(t *testing.T) {
+	cfg := &config.HubConfig{ListenAddr: "192.0.2.10:8443"}
+	got, err := defaultHubURL(cfg)
+	if err != nil {
+		t.Fatalf("defaultHubURL: %v", err)
+	}
+	if got != "https://192.0.2.10:8443" {
+		t.Errorf("got %q, want https://192.0.2.10:8443", got)
+	}
+}
+
+func TestDefaultHubURL_PrefersTLSHostOverWildcardListenAddr(t *testing.T) {
+	cfg := &config.HubConfig{ListenAddr: "0.0.0.0:8443", TLSHost: "hub.example.com"}
+	got, err := defaultHubURL(cfg)
+	if err != nil {
+		t.Fatalf("defaultHubURL: %v", err)
+	}
+	if got != "https://hub.example.com:8443" {
+		t.Errorf("got %q, want https://hub.example.com:8443", got)
+	}
+}
+
+func testGenerateTokenConfig(dir string) *config.HubConfig {
+	return &config.HubConfig{
+		ListenAddr:  "127.0.0.1:8443",
+		DataDir:     dir,
+		DBPath:      filepath.Join(dir, "test.db"),
+		TLSCertFile: filepath.Join(dir, "cert.pem"),
+		TLSKeyFile:  filepath.Join(dir, "key.pem"),
+		DNSProviders: map[string]config.DNSProviderConfig{
+			"route53_main": {Type: "route53"},
+		},
+		Spokes: map[string]config.SpokeEntry{},
+	}
+}
+
+func TestRunGenerateToken_MissingRequiredArgsErrors(t *testing.T) {
+	cfg := testGenerateTokenConfig(t.TempDir())
+	if err := runGenerateToken(cfg, generateTokenArgs{}); err == nil {
+		t.Fatal("expected an error for missing required args, got nil")
+	}
+}
+
+func TestRunGenerateToken_UnknownDNSProviderErrors(t *testing.T) {
+	cfg := testGenerateTokenConfig(t.TempDir())
+	args := generateTokenArgs{
+		SpokeID:     "radius-spoke",
+		CertName:    "radius-cert",
+		Domains:     "radius.example.com",
+		DNSProvider: "does-not-exist",
+		TTL:         time.Hour,
+	}
+	if err := runGenerateToken(cfg, args); err == nil {
+		t.Fatal("expected an error for a dns_provider not defined in the hub config, got nil")
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns
+// everything written to it - real output from the real function, not a
+// mock of one, since runGenerateToken prints directly rather than
+// returning what it printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	os.Stdout = w
+
+	fn()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return buf.String()
+}
+
+// TestRunGenerateToken_PrintedTokenIsGenuinelyRedeemable is the real
+// end-to-end proof: capture what runGenerateToken actually prints, decode
+// the token from it exactly as acme-spoke --load-token would, and confirm
+// its secret is a real, redeemable row in the hub's real database - not
+// just that the function returned without error.
+func TestRunGenerateToken_PrintedTokenIsGenuinelyRedeemable(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testGenerateTokenConfig(dir)
+	args := generateTokenArgs{
+		SpokeID:     "radius-spoke",
+		CertName:    "radius-cert",
+		Domains:     "radius.example.com",
+		DNSProvider: "route53_main",
+		TTL:         time.Hour,
+	}
+
+	output := captureStdout(t, func() {
+		if err := runGenerateToken(cfg, args); err != nil {
+			t.Fatalf("runGenerateToken: %v", err)
+		}
+	})
+
+	if _, err := os.Stat(cfg.TLSCertFile); err != nil {
+		t.Fatalf("stat tls_cert_file after runGenerateToken (ensureTLS should have generated it): %v", err)
+	}
+
+	const marker = "--load-token "
+	idx := strings.LastIndex(output, marker)
+	if idx == -1 {
+		t.Fatalf("printed output missing %q line:\n%s", marker, output)
+	}
+	tokenStr := strings.TrimSpace(output[idx+len(marker):])
+
+	tok, err := enrolltoken.Decode(tokenStr)
+	if err != nil {
+		t.Fatalf("decode printed token: %v", err)
+	}
+	if tok.HubURL != "https://127.0.0.1:8443" {
+		t.Errorf("got token hub_url %q, want https://127.0.0.1:8443 (defaulted from listen_addr)", tok.HubURL)
+	}
+
+	st, err := hubstore.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	spokeID, _, ok, err := st.LookupEnrollmentToken(tok.Secret, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("LookupEnrollmentToken: %v", err)
+	}
+	if !ok {
+		t.Fatal("the printed token's secret is not a valid, redeemable enrollment token in the hub's database")
+	}
+	if spokeID != "radius-spoke" {
+		t.Errorf("got spoke_id %q, want radius-spoke", spokeID)
 	}
 }

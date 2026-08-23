@@ -253,6 +253,116 @@ func TestPlan_DomainDNSProvidersRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+func validEnrollmentRequest() EnrollmentRequest {
+	return EnrollmentRequest{
+		SpokeID:     "new-spoke",
+		CertName:    "new-cert",
+		Domains:     []string{"new.example.com"},
+		DNSProvider: "route53_main",
+		HubURL:      "https://192.0.2.10:8443",
+	}
+}
+
+func TestPlanEnrollment_ValidRequestSucceeds(t *testing.T) {
+	plan, err := PlanEnrollment(testHubConfig(), validEnrollmentRequest())
+	if err != nil {
+		t.Fatalf("PlanEnrollment: %v", err)
+	}
+	if len(plan.BearerToken) != 64 { // 32 bytes hex-encoded, same as GenerateToken elsewhere
+		t.Errorf("got bearer token length %d, want 64", len(plan.BearerToken))
+	}
+	if len(plan.EnrollmentSecret) != 64 {
+		t.Errorf("got enrollment secret length %d, want 64", len(plan.EnrollmentSecret))
+	}
+	if plan.BearerToken == plan.EnrollmentSecret {
+		t.Error("got identical bearer token and enrollment secret, want two independently generated values")
+	}
+	if plan.HubEnvVarName != "SPOKE_NEW_SPOKE_TOKEN" {
+		t.Errorf("got env var name %q, want SPOKE_NEW_SPOKE_TOKEN", plan.HubEnvVarName)
+	}
+	for _, want := range []string{"new-spoke", "new-cert", "new.example.com", "route53_main", "SPOKE_NEW_SPOKE_TOKEN"} {
+		if !strings.Contains(plan.HubConfigYAML, want) {
+			t.Errorf("hub config YAML missing %q:\n%s", want, plan.HubConfigYAML)
+		}
+	}
+}
+
+// TestPlanEnrollment_ExistingSpokeErrors is the scope boundary that
+// distinguishes PlanEnrollment from Plan: enrolling an already-configured
+// spoke isn't this function's job at all, not even to reuse its existing
+// token the way Plan does for an additional certificate.
+func TestPlanEnrollment_ExistingSpokeErrors(t *testing.T) {
+	req := validEnrollmentRequest()
+	req.SpokeID = "existing-spoke"
+
+	_, err := PlanEnrollment(testHubConfig(), req)
+	if err == nil {
+		t.Fatal("expected an error enrolling a spoke that already exists in the hub config, got nil")
+	}
+}
+
+func TestPlanEnrollment_UnknownDNSProviderErrors(t *testing.T) {
+	req := validEnrollmentRequest()
+	req.DNSProvider = "does-not-exist"
+
+	_, err := PlanEnrollment(testHubConfig(), req)
+	if err == nil {
+		t.Fatal("expected an error for a dns_provider not defined in the hub config, got nil")
+	}
+}
+
+func TestPlanEnrollment_MissingRequiredFieldsError(t *testing.T) {
+	base := validEnrollmentRequest()
+	cases := []struct {
+		name   string
+		mutate func(*EnrollmentRequest)
+	}{
+		{"spoke id", func(r *EnrollmentRequest) { r.SpokeID = "" }},
+		{"cert name", func(r *EnrollmentRequest) { r.CertName = "" }},
+		{"domains", func(r *EnrollmentRequest) { r.Domains = nil }},
+		{"dns provider", func(r *EnrollmentRequest) { r.DNSProvider = "" }},
+		{"hub url", func(r *EnrollmentRequest) { r.HubURL = "" }},
+	}
+	for _, c := range cases {
+		req := base
+		c.mutate(&req)
+		if _, err := PlanEnrollment(testHubConfig(), req); err == nil {
+			t.Errorf("missing %s: expected an error, got nil", c.name)
+		}
+	}
+}
+
+func TestPlanEnrollment_DomainDNSProvidersRejectsDomainNotInRequest(t *testing.T) {
+	req := validEnrollmentRequest()
+	req.DomainDNSProviders = map[string]string{"other.example.org": "route53_main"}
+
+	_, err := PlanEnrollment(testHubConfig(), req)
+	if err == nil {
+		t.Fatal("expected an error for domain_dns_providers referencing a domain not in Domains, got nil")
+	}
+}
+
+// TestPlanEnrollment_SuccessiveCallsGenerateDistinctTokens guards against
+// a copy-paste mistake reusing the same GenerateToken result for both the
+// bearer token and the enrollment secret, or generating either
+// non-randomly.
+func TestPlanEnrollment_SuccessiveCallsGenerateDistinctTokens(t *testing.T) {
+	first, err := PlanEnrollment(testHubConfig(), validEnrollmentRequest())
+	if err != nil {
+		t.Fatalf("first PlanEnrollment: %v", err)
+	}
+	second, err := PlanEnrollment(testHubConfig(), validEnrollmentRequest())
+	if err != nil {
+		t.Fatalf("second PlanEnrollment: %v", err)
+	}
+	if first.BearerToken == second.BearerToken {
+		t.Error("two successive calls generated the identical bearer token")
+	}
+	if first.EnrollmentSecret == second.EnrollmentSecret {
+		t.Error("two successive calls generated the identical enrollment secret")
+	}
+}
+
 func TestPlanRotation_UnknownSpokeErrors(t *testing.T) {
 	_, err := PlanRotation(testHubConfig(), RotationRequest{SpokeID: "no-such-spoke"})
 	if err == nil {

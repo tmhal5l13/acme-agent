@@ -10,8 +10,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -96,4 +98,30 @@ func GenerateCert(certPath, keyPath, host string) error {
 	}
 
 	return nil
+}
+
+// Fingerprint returns the SHA-256 hex fingerprint of the certificate at
+// certPath — the same value cmd/acme-hub logs on startup, what an
+// operator compares by hand when copying a cert to a new spoke, and what
+// internal/enrolltoken embeds in an enrollment token so a spoke can
+// verify it cryptographically during its first TLS handshake with the
+// hub instead. Computed over the parsed certificate's DER bytes
+// (x509.Certificate.Raw), not the raw PEM file bytes — a plain
+// `sha256sum` on the file will NOT match this, since it hashes the PEM
+// text encoding rather than the certificate itself.
+func Fingerprint(certPath string) (string, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", fmt.Errorf("no PEM block found in %s", certPath)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:]), nil
 }
