@@ -128,15 +128,24 @@ go build -o /tmp/acme-spoke  ./cmd/acme-spoke
 go build -o /tmp/acme-onboard ./cmd/acme-onboard
 ```
 
-Copy `deploy/hub-config.example.yaml` and `deploy/spoke-config.example.yaml`
-and fill in your DNS provider credentials, domains, and a bearer token
-(`acme-onboard` will generate that token and the matching config for you —
-see `ARCHITECTURE.md` → "Onboarding a spoke"). Use
+Copy `deploy/hub-config.example.yaml`, set `data_dir` and a `status_token`
+(everything else has sane defaults), and start the hub:
+
+```
+/tmp/acme-hub --config hub-config.yaml &
+```
+
+Spokes and DNS providers aren't configured in that file — they're managed
+through the hub's own database. Open `https://<host>:<port>/admin` in a
+browser (any username, `status_token` as the password) to add a DNS
+provider and a spoke, or use `acme-onboard` /
+`acme-hub --generate-token` to do the same from a script (see
+`ARCHITECTURE.md` → "Onboarding a spoke"). Either way you'll end up with
+a bearer token and a generated `spoke-config.yaml`. Use
 `acme.environment: staging` while you're testing; Let's Encrypt's
 production environment has real rate limits.
 
 ```
-/tmp/acme-hub --config hub-config.yaml &
 /tmp/acme-spoke --config spoke-config.yaml --once
 ```
 

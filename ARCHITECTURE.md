@@ -125,7 +125,7 @@ just set: a server that can't negotiate above TLS 1.2 fails the handshake.
 |---|---|---|
 | `config` | both | YAML config loading/validation for both binaries — `HubConfig`/`LoadHubConfig` and `SpokeConfig`/`LoadSpokeConfig`, sharing a `Duration` type and `${VAR}` env-expansion for secrets |
 | `internal/hubapi` | hub | HTTP handlers: bearer-token auth, per-spoke domain authorization, checkin, due, dns01 relay, notify_hook transition detection, read-only admin dashboard |
-| `internal/hubstore` | hub | SQLite: what spokes have last reported (`spoke_cert_state`) — observed state only; desired state (domains, DNS provider, policy) lives in the hub's config, not the DB. Tracks a `schema_meta.version` and migrates an existing database forward on `Open` — see "Renewal health tracking" below |
+| `internal/hubstore` | hub | SQLite: both what spokes have last reported (`spoke_cert_state` — observed state) and, since "Database-backed desired state" below, which spokes/DNS providers exist and what they're authorized for (`spokes`, `spoke_tokens`, `spoke_certs`, `dns_providers` — desired state). Tracks a `schema_meta.version` and migrates an existing database forward on `Open` — see "Renewal health tracking" below |
 | `internal/dnsprovider` | hub | Builds a real `lego` DNS-01 `challenge.Provider` (Route53, Cloudflare, GoDaddy, PowerDNS) from config. The one package that ever touches DNS provider credentials |
 | `internal/selfsigned` | hub | Generates the hub's self-signed TLS certificate on first startup — see "TLS" above |
 | `internal/onboard` | `cmd/acme-onboard`, `cmd/acme-hub --generate-token` | Validates a new spoke/certificate, writes it directly into the hub's database (`internal/hubstore`), and generates the spoke's own config.yaml — see "Onboarding a spoke" below |
@@ -448,17 +448,6 @@ A lower-friction alternative to fully manual onboarding (below): `acme-hub
 dialing the hub, verifying it cryptographically, and writing a working
 `config.yaml` itself.
 
-> **Mid-migration note:** as of this section's most recent update,
-> `--generate-token` and `acme-onboard` (below) write the spoke/cert
-> straight into the hub's database (`internal/hubstore`), replacing the
-> hub-config-snippet-to-paste flow both used to require. The hub's own
-> *serving* path (`internal/hubapi`) still reads spoke desired state from
-> `config.HubConfig.Spokes` at this point, not the database — that cutover
-> is the very next change, landing together with this one in practice.
-> Once it does, this note (and the "Onboarding a spoke" section below)
-> gets a fuller rewrite to describe the end state; treat both as
-> in-progress until then.
-
 ### `acme-hub --generate-token`
 
 ```
@@ -497,20 +486,26 @@ matching how bearer tokens in `config.yaml` are handled — see
 project's deliberate pattern, not an oversight), `spoke_id`, the
 pre-generated `bearer_token` to hand back, `expires_at`, and `redeemed_at`
 — deliberately no cert/domain/DNS-provider assignment duplicated here;
-that already lives in `config.HubConfig.Spokes`, and reading it live at
-redemption time (via the hot-reloadable state from "Config hot-reload"
-above) is what guarantees it can never drift stale against a second copy.
+that already lives in the hub's database (see "Database-backed desired
+state" above), and reading it live at redemption time (via the
+hot-reloaded `hubState.spokes`, not a second query per request — see
+"Config hot-reload") is what guarantees it can never drift stale against
+a second copy.
 
 Redemption is atomic and genuinely single-use — `hubstore.Store.RedeemEnrollmentToken`
 follows the exact WHERE-guarded pattern `Claim` established for the
 renewal lease, proven under real concurrent goroutines the same way. One
 sequencing detail matters for correctness: the handler checks whether the
 secret's associated spoke is actually present in the hub's *current*
-config *before* consuming the secret. If the hub hasn't yet reloaded to
-pick up the newly created spoke, the endpoint returns `503` without
-redeeming anything — the same secret works once it has, rather than
-being permanently burned by an early, doomed-to-fail
-attempt.
+desired state *before* consuming the secret. If the hub hasn't yet
+reloaded to pick up the newly created spoke, the endpoint returns `503`
+without redeeming anything — the same secret works once it has, rather
+than being permanently burned by an early, doomed-to-fail attempt. In
+practice this window is small: `--generate-token` writes the spoke to the
+database itself, and the operator (or `acme-onboard`) just needs to send
+one `SIGHUP` — or, if the spoke was created via the web admin UI instead,
+there's no window at all, since that write already triggers its own
+in-process reload.
 
 ## Onboarding a spoke
 
@@ -862,7 +857,8 @@ doesn't register the route at all, rather than registering it and always
 rejecting, so it's a 404, not a 401, when unconfigured.
 
 The response merges two sources, not just `hubstore.Store.All()` alone: a
-certificate that's configured (`cfg.Spokes[*].Certs`) but has never once
+certificate that's configured (`state.spokes[*].Certs`, sourced from the
+database — see "Database-backed desired state" above) but has never once
 checked in still appears, as `status: "unknown"` (`spoke_cert_state`'s own
 default), rather than silently missing from the response just because no
 row exists for it yet.
@@ -958,7 +954,7 @@ scan (independent of any checkin arriving), launched by `cmd/acme-hub`
 alongside the HTTP server and stopped on the same shutdown signal.
 
 Each pass reuses `hubstore.Store.All()` (see "Status/dashboard API"
-above) merged against `cfg.Spokes`, and flags a certificate stale if
+above) merged against `state.spokes`, and flags a certificate stale if
 either:
 
 - it has a real `last_checkin_at`, but longer ago than
@@ -1132,7 +1128,13 @@ The manual rotation procedure:
   call while a claim is held reports not-due and that a released claim
   (via checkin) is immediately claimable again, and token rotation
   including that a spoke with two tokens configured authenticates with
-  either one, not just the first — all via real HTTP
+  either one, not just the first, and the web admin UI's write endpoints
+  including that a spoke created via `POST /admin/spokes` authorizes on
+  its very next request with no explicit reload (the actual point of
+  the in-process `Server.Reload` call every write handler makes),
+  the `Origin`-header CSRF check rejecting a missing or mismatched
+  origin, and a DNS provider removal being refused while a cert still
+  references it, surfaced as a real `409`, not a `500` — all via real HTTP
   requests against a real temp-file SQLite store, with a fake
   `challenge.Provider` standing in for a real DNS API, and (for the
   claim specifically) against real Pebble/`pebble-challtestsrv`
@@ -1143,8 +1145,14 @@ The manual rotation procedure:
   keeps a failed renewal from erasing a still-valid certificate's known
   expiry, the failure-streak/last-success tracking, `All`'s fleet-wide
   enumeration, `Claim`'s atomicity under real concurrent goroutines (not
-  just assumed from the SQL), and the `schema_meta` migration path
-  against hand-built pre-migration databases at each version),
+  just assumed from the SQL), the `schema_meta` migration path against
+  hand-built pre-migration databases at each version, and — since
+  desired state moved here — `CreateSpoke`'s duplicate-token rejection
+  under real concurrent goroutines racing for the same token string,
+  `DeleteSpoke`'s cascade across tokens/certs/observed state/enrollment
+  tokens, `RemoveSpokeToken`'s last-token refusal, and
+  `RemoveDNSProvider`'s refusal while still referenced either as a cert's
+  default provider or a `domain_dns_providers` override),
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
   backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
   (including a round-trip through the real config loader, and
@@ -1264,7 +1272,9 @@ The manual rotation procedure:
   hosted-zone ARNs, doesn't need this), each `route53_*` entry may set its
   own `access_key_id`/`secret_access_key` (must be set together, or not at
   all) and optional `session_token` (temporary/STS credentials only, requires
-  the other two) — see `deploy/hub-config.example.yaml`. `internal/dnsprovider`
+  the other two) — settable via the web admin UI's DNS provider form (see
+  "Web admin UI" above) or `hubstore.Store.UpsertDNSProvider` directly.
+  `internal/dnsprovider`
   doesn't duplicate lego's own validation of these; `route53.NewDNSProviderConfig`
   already rejects an incomplete combination. Every other provider
   (Cloudflare, GoDaddy, PowerDNS, rfc2136) already takes its credentials

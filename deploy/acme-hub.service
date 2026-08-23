@@ -25,15 +25,17 @@ DynamicUser=yes
 StateDirectory=acme-hub
 StateDirectoryMode=0750
 
-# Secrets referenced via ${VAR} in config.yaml (DNS provider credentials,
-# spoke bearer tokens) live in acme-hub.env, kept out of source control.
-# acme-hub itself reads this file directly - not just via
-# EnvironmentFile= below - every time it (re)loads config.yaml, including
-# on every SIGHUP reload (see ARCHITECTURE.md "Config hot-reload"): a
-# process's own environment is fixed at exec time, so a variable added to
-# this file after startup (e.g. a newly-enrolled spoke's bearer token)
-# would never become visible through EnvironmentFile= alone without a
-# restart. That direct read needs real read access to the file, which
+# Secrets referenced via ${VAR} in config.yaml (status_token, and any
+# other startup-only field that needs one - spoke bearer tokens and DNS
+# provider credentials live in the hub's own database instead, see
+# ARCHITECTURE.md "Database-backed desired state") live in acme-hub.env,
+# kept out of source control. acme-hub itself reads this file directly -
+# not just via EnvironmentFile= below - every time it (re)loads
+# config.yaml, including on every SIGHUP reload (see ARCHITECTURE.md
+# "Config hot-reload"): a process's own environment is fixed at exec
+# time, so a variable added to this file after startup would never
+# become visible through EnvironmentFile= alone without a restart. That
+# direct read needs real read access to the file, which
 # DynamicUser's freshly-allocated, otherwise-unprivileged UID doesn't
 # have on its own - hence acme-hub-secrets below: a stable group (unlike
 # the UID, which changes every start) that install-hub.sh creates and

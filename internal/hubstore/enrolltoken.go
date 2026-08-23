@@ -38,10 +38,11 @@ func (s *Store) InsertEnrollmentToken(secret, spokeID, bearerToken string, expir
 //
 // This exists separately from RedeemEnrollmentToken specifically so a
 // caller (POST /v1/enroll) can check whether the associated spoke is
-// actually authorized yet in the hub's current config *before* consuming
-// the one-time secret - redeeming a secret that can't yet be fully
-// honored (the operator hasn't pasted the generated snippet and reloaded
-// the hub yet) would permanently strand their retry once they do.
+// actually authorized yet in the hub's current, live desired state
+// *before* consuming the one-time secret - redeeming a secret that can't
+// yet be fully honored (the write that created the spoke hasn't reloaded
+// into hubState yet) would permanently strand the caller's retry once it
+// has.
 func (s *Store) LookupEnrollmentToken(secret string, now time.Time) (spokeID, bearerToken string, ok bool, err error) {
 	row := s.db.QueryRow(`
 		SELECT spoke_id, bearer_token FROM enrollment_tokens

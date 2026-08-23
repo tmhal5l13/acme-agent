@@ -4,9 +4,10 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 5);
 
--- Observed state only, reported by spokes via checkin. Desired state (which
--- domains, which DNS provider, renewal policy) lives in the hub's
--- config.yaml, not here — see config.HubConfig.
+-- Observed state only, reported by spokes via checkin - which domains,
+-- which DNS provider, and renewal policy are desired state, tracked in
+-- this same database's spokes/spoke_certs/dns_providers tables below
+-- (schema version 5) instead, not here.
 --
 -- consecutive_failures and last_success_at (schema version 2) exist
 -- because status/last_error/last_checkin_at alone can't answer "is this
