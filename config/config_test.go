@@ -164,7 +164,7 @@ func TestValidateDomain(t *testing.T) {
 		{"*.", true},
 	}
 	for _, c := range cases {
-		err := validateDomain(c.domain)
+		err := ValidateDomain(c.domain)
 		if c.wantErr && err == nil {
 			t.Errorf("%q: expected an error, got nil", c.domain)
 		}
@@ -190,7 +190,7 @@ func TestValidateCertName(t *testing.T) {
 		{`a\b`, true},
 	}
 	for _, c := range cases {
-		err := validateCertName(c.name)
+		err := ValidateCertName(c.name)
 		if c.wantErr && err == nil {
 			t.Errorf("%q: expected an error, got nil", c.name)
 		}

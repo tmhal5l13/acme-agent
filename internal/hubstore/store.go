@@ -18,6 +18,16 @@ var schemaSQL string
 // ErrNotFound is returned by Get-style methods when no row matches.
 var ErrNotFound = errors.New("hubstore: not found")
 
+// Sentinel errors for the desired-state write methods (spokes.go,
+// spokecerts.go, dnsproviders.go) - see each method's own doc comment for
+// which of these it can return and why.
+var (
+	ErrAlreadyExists = errors.New("hubstore: already exists")
+	ErrTokenInUse    = errors.New("hubstore: token already in use by another spoke")
+	ErrInUse         = errors.New("hubstore: still referenced, cannot remove")
+	ErrLastToken     = errors.New("hubstore: refusing to remove a spoke's last token")
+)
+
 // Store wraps a SQLite connection pool with the hub's schema applied.
 type Store struct {
 	db *sql.DB
@@ -27,7 +37,7 @@ type Store struct {
 // seeds a brand-new database with. Existing databases are brought up to it
 // by migrate, since CREATE TABLE IF NOT EXISTS (schema.sql's only tool) does
 // nothing for a table that already exists in an older shape.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // Open opens (creating if necessary) the SQLite database at path, applies
 // the schema, and migrates an existing database up to currentSchemaVersion
@@ -109,6 +119,18 @@ func migrate(db *sql.DB) error {
 		// version bump.
 		if _, err := db.Exec(`UPDATE schema_meta SET version = 4 WHERE id = 1`); err != nil {
 			return fmt.Errorf("record schema version 4: %w", err)
+		}
+	}
+
+	if version < 5 {
+		// No ALTER needed - spokes/spoke_tokens/spoke_certs/dns_providers
+		// are all wholly new tables, and schema.sql's CREATE TABLE IF NOT
+		// EXISTS above already applies them identically whether this is a
+		// fresh database or one upgrading from an earlier version. This
+		// block exists purely to keep schema_meta.version's bookkeeping
+		// consistent with every other version bump.
+		if _, err := db.Exec(`UPDATE schema_meta SET version = 5 WHERE id = 1`); err != nil {
+			return fmt.Errorf("record schema version 5: %w", err)
 		}
 	}
 

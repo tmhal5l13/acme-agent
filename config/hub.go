@@ -139,14 +139,14 @@ type ACMEDefaultsConfig struct {
 // switched over to the new one without a coordinated instant cutover.
 // Under normal operation it holds exactly one.
 type SpokeEntry struct {
-	Tokens []string          `yaml:"tokens"`
-	Certs  []SpokeCertConfig `yaml:"certs"`
+	Tokens []string          `yaml:"tokens" json:"tokens"`
+	Certs  []SpokeCertConfig `yaml:"certs" json:"certs"`
 }
 
 // SpokeCertConfig is one certificate a spoke is authorized to manage.
 type SpokeCertConfig struct {
-	Name    string   `yaml:"name"`
-	Domains []string `yaml:"domains"`
+	Name    string   `yaml:"name" json:"name"`
+	Domains []string `yaml:"domains" json:"domains"`
 
 	// DNSProvider is which dns_providers entry relays DNS-01 for this
 	// cert's domains — the default for every domain in Domains, and the
@@ -159,7 +159,7 @@ type SpokeCertConfig struct {
 	// covers the overwhelmingly common case (every domain on one cert
 	// really is on the same provider); DomainDNSProviders exists for the
 	// rare case it isn't.
-	DNSProvider string `yaml:"dns_provider"`
+	DNSProvider string `yaml:"dns_provider" json:"dns_provider"`
 
 	// DomainDNSProviders optionally overrides DNSProvider for specific
 	// domains — keys must be entries already in Domains, values must be
@@ -168,9 +168,9 @@ type SpokeCertConfig struct {
 	// normal. Optional and almost always empty; only needed when one
 	// certificate's SAN list spans domains on genuinely different DNS
 	// backends.
-	DomainDNSProviders map[string]string `yaml:"domain_dns_providers"`
+	DomainDNSProviders map[string]string `yaml:"domain_dns_providers" json:"domain_dns_providers,omitempty"`
 
-	RenewBefore Duration `yaml:"renew_before"` // optional; 0 means "use ACMEDefaults.RenewBefore"
+	RenewBefore Duration `yaml:"renew_before" json:"renew_before,omitempty"` // optional; 0 means "use ACMEDefaults.RenewBefore"
 }
 
 const (
@@ -286,7 +286,7 @@ func (c *HubConfig) validate() error {
 
 		seenNames := make(map[string]bool, len(spoke.Certs))
 		for _, cert := range spoke.Certs {
-			if err := validateCertName(cert.Name); err != nil {
+			if err := ValidateCertName(cert.Name); err != nil {
 				return fmt.Errorf("spokes[%s]: %w", spokeID, err)
 			}
 			if seenNames[cert.Name] {
@@ -298,7 +298,7 @@ func (c *HubConfig) validate() error {
 				return fmt.Errorf("spokes[%s].certs[%s]: at least one domain is required", spokeID, cert.Name)
 			}
 			for _, d := range cert.Domains {
-				if err := validateDomain(d); err != nil {
+				if err := ValidateDomain(d); err != nil {
 					return fmt.Errorf("spokes[%s].certs[%s]: %w", spokeID, cert.Name, err)
 				}
 			}

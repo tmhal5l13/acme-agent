@@ -100,10 +100,10 @@ func (a ACMEConfig) validate() error {
 // internal/hubapi). Type selects the internal/dnsprovider factory
 // implementation to use; which of the fields below apply depends on Type.
 type DNSProviderConfig struct {
-	Type string `yaml:"type"`
+	Type string `yaml:"type" json:"type"`
 
 	// cloudflare
-	APIToken string `yaml:"api_token"`
+	APIToken string `yaml:"api_token" json:"api_token,omitempty"`
 
 	// route53 (AWS). By default, credentials come from the standard AWS
 	// SDK credential chain (environment variables, ~/.aws/credentials, or
@@ -126,21 +126,21 @@ type DNSProviderConfig struct {
 	// HostedZoneID and Region are optional overrides, independent of
 	// credentials - they apply regardless of which credential source is
 	// in effect for this entry.
-	AccessKeyID     string `yaml:"access_key_id"`
-	SecretAccessKey string `yaml:"secret_access_key"`
-	SessionToken    string `yaml:"session_token"`
-	HostedZoneID    string `yaml:"hosted_zone_id"`
-	Region          string `yaml:"region"`
+	AccessKeyID     string `yaml:"access_key_id" json:"access_key_id,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key" json:"secret_access_key,omitempty"`
+	SessionToken    string `yaml:"session_token" json:"session_token,omitempty"`
+	HostedZoneID    string `yaml:"hosted_zone_id" json:"hosted_zone_id,omitempty"`
+	Region          string `yaml:"region" json:"region,omitempty"`
 
 	// godaddy
-	APIKey    string `yaml:"api_key"`
-	APISecret string `yaml:"api_secret"`
+	APIKey    string `yaml:"api_key" json:"api_key,omitempty"`
+	APISecret string `yaml:"api_secret" json:"api_secret,omitempty"`
 
 	// pdns (self-hosted PowerDNS). APIURL is required (e.g.
 	// "http://127.0.0.1:8081"); ServerName is optional and defaults to
 	// "localhost", PowerDNS's own default virtual server ID.
-	APIURL     string `yaml:"api_url"`
-	ServerName string `yaml:"server_name"`
+	APIURL     string `yaml:"api_url" json:"api_url,omitempty"`
+	ServerName string `yaml:"server_name" json:"server_name,omitempty"`
 
 	// rfc2136 (TSIG-authenticated dynamic DNS updates - BIND, Windows AD
 	// DNS, etc.). Nameserver is the authoritative server's host:port to
@@ -148,10 +148,10 @@ type DNSProviderConfig struct {
 	// optional; lego defaults to HMAC-SHA1 if left blank - prefer setting
 	// it explicitly (e.g. "hmac-sha256.") to match whatever algorithm the
 	// TSIG key was actually generated with.
-	Nameserver    string `yaml:"nameserver"`
-	TSIGKey       string `yaml:"tsig_key"`
-	TSIGSecret    string `yaml:"tsig_secret"`
-	TSIGAlgorithm string `yaml:"tsig_algorithm"`
+	Nameserver    string `yaml:"nameserver" json:"nameserver,omitempty"`
+	TSIGKey       string `yaml:"tsig_key" json:"tsig_key,omitempty"`
+	TSIGSecret    string `yaml:"tsig_secret" json:"tsig_secret,omitempty"`
+	TSIGAlgorithm string `yaml:"tsig_algorithm" json:"tsig_algorithm,omitempty"`
 }
 
 // EnvSource resolves one ${VAR} reference during config loading - see
@@ -303,14 +303,19 @@ func parseEnvFile(path string) (map[string]string, error) {
 	return vars, nil
 }
 
-// validateDomain rejects obviously malformed domain strings - not a full
+// ValidateDomain rejects obviously malformed domain strings - not a full
 // hostname validator (deliberately loose, so it can't false-reject a
 // legitimate but unusual hostname), just enough to catch the operator
 // typos an empty-slice check alone can't: a blank string sitting in the
 // domains list, or stray whitespace from a copy-paste. A single leading
 // "*." is explicitly allowed, since wildcard certificates are a normal,
 // already-tested case.
-func validateDomain(d string) error {
+//
+// Exported for internal/hubstore, which needs to run this same check on
+// every desired-state write since - once spokes/DNS providers are
+// database-backed - there's no longer a YAML-load step downstream that
+// would otherwise catch a malformed value.
+func ValidateDomain(d string) error {
 	if d == "" {
 		return fmt.Errorf("domain must not be empty")
 	}
@@ -325,13 +330,17 @@ func validateDomain(d string) error {
 	return nil
 }
 
-// validateCertName rejects a certificate name that isn't safe to use as a
+// ValidateCertName rejects a certificate name that isn't safe to use as a
 // single path component. Both configs' cert names end up in a filesystem
 // path unguarded (internal/spokeagent.ProcessCert does
 // filepath.Join(dataDir, "certs", cert.Name)), so a name like "../../etc"
 // or containing a "/" would otherwise pass validation and let certwriter
 // write outside the intended certs directory.
-func validateCertName(name string) error {
+//
+// Exported for internal/hubstore - see ValidateDomain's doc comment for
+// why this needs to be callable from there directly, not just at
+// YAML-load time.
+func ValidateCertName(name string) error {
 	if name == "" {
 		return fmt.Errorf("name is required")
 	}

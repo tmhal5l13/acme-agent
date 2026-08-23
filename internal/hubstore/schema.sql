@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     id      INTEGER PRIMARY KEY CHECK (id = 1),
     version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 4);
+INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 5);
 
 -- Observed state only, reported by spokes via checkin. Desired state (which
 -- domains, which DNS provider, renewal policy) lives in the hub's
@@ -64,4 +64,48 @@ CREATE TABLE IF NOT EXISTS enrollment_tokens (
     created_at    TIMESTAMP NOT NULL,
     expires_at    TIMESTAMP NOT NULL,
     redeemed_at   TIMESTAMP
+);
+
+-- spokes/spoke_tokens/spoke_certs/dns_providers (schema version 5) are the
+-- hub's desired state - which spokes exist, their bearer tokens, and which
+-- certificates/domains/DNS providers each is authorized to act on - moved
+-- here from config.HubConfig.Spokes/.DNSProviders so a write-capable web
+-- admin UI (and CLI tools: cmd/acme-onboard, acme-hub --generate-token) can
+-- create/edit/delete them directly, taking effect immediately via
+-- internal/hubapi.Server.Reload, instead of requiring a hand-edited
+-- config.yaml and a restart/SIGHUP. No SQL foreign keys, matching this
+-- schema's existing precedent (spoke_cert_state above has none either) -
+-- referential integrity (a cert's dns_provider must exist, a DNS provider
+-- can't be removed while referenced) is enforced in Go, transactionally,
+-- by internal/hubstore's own methods, not the database engine.
+CREATE TABLE IF NOT EXISTS spokes (
+    id         TEXT PRIMARY KEY,
+    created_at TIMESTAMP NOT NULL
+);
+
+-- token is the table's primary key, not just spoke_id+token - this is what
+-- gives "a bearer token must be globally unique across every spoke" for
+-- free (an INSERT for a token already in use by any spoke, including a
+-- different one, fails outright), replacing the app-level seenTokens check
+-- config.HubConfig.validate() used to make across the whole YAML document
+-- at once.
+CREATE TABLE IF NOT EXISTS spoke_tokens (
+    token      TEXT PRIMARY KEY,
+    spoke_id   TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS spoke_certs (
+    spoke_id                  TEXT NOT NULL,
+    name                      TEXT NOT NULL,
+    domains_json              TEXT NOT NULL,              -- JSON array of domain strings
+    dns_provider              TEXT NOT NULL,               -- its own column, not buried in domains_json-style JSON, so checking "is this provider still referenced" doesn't need JSON parsing for the common (non-override) case
+    domain_dns_providers_json TEXT NOT NULL DEFAULT '{}',  -- JSON object, domain -> dns_providers name override
+    renew_before_ns           INTEGER NOT NULL DEFAULT 0,  -- nanoseconds; 0 means "use acme_defaults.renew_before" - mirrors config.Duration's own underlying int64 representation
+    PRIMARY KEY (spoke_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS dns_providers (
+    name        TEXT PRIMARY KEY,
+    config_json TEXT NOT NULL   -- config.DNSProviderConfig, JSON-marshaled whole (type + whichever type's credential fields apply) - see internal/hubstore/dnsproviders.go
 );
