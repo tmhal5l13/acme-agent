@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     id      INTEGER PRIMARY KEY CHECK (id = 1),
     version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 3);
+INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 4);
 
 -- Observed state only, reported by spokes via checkin. Desired state (which
 -- domains, which DNS provider, renewal policy) lives in the hub's
@@ -43,4 +43,25 @@ CREATE TABLE IF NOT EXISTS spoke_cert_state (
     claimed_at            TIMESTAMP,
     claim_expires_at      TIMESTAMP,
     PRIMARY KEY (spoke_id, name)
+);
+
+-- enrollment_tokens (schema version 4) backs low-friction spoke enrollment:
+-- a one-time secret, minted by `acme-hub --generate-token`, redeemed by
+-- `acme-spoke --load-token` against POST /v1/enroll. Deliberately holds no
+-- cert/domain/dns_provider assignment - that already lives in the hub's
+-- config.yaml (config.HubConfig.Spokes) once the operator pastes the
+-- generated snippet and reloads, and reading it live at redemption time
+-- (rather than a second, potentially-stale copy here) is what guarantees
+-- it can never drift out of sync with the one real source of desired
+-- state. secret is stored in cleartext, same as every bearer token in
+-- config.yaml - see internal/hubapi/auth.go's authorize doc comment for
+-- why a plain lookup (not hashing) is this project's established pattern
+-- for these.
+CREATE TABLE IF NOT EXISTS enrollment_tokens (
+    secret        TEXT PRIMARY KEY,
+    spoke_id      TEXT NOT NULL,
+    bearer_token  TEXT NOT NULL,
+    created_at    TIMESTAMP NOT NULL,
+    expires_at    TIMESTAMP NOT NULL,
+    redeemed_at   TIMESTAMP
 );

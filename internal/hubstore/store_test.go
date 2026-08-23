@@ -187,6 +187,89 @@ func TestOpen_MigratesV2ToV3(t *testing.T) {
 	}
 }
 
+// oldV3Schema is exactly what schema.sql looked like before
+// enrollment_tokens was added - the full spoke_cert_state shape (through
+// the claim columns) with no enrollment_tokens table at all yet.
+const oldV3Schema = `
+CREATE TABLE schema_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL
+);
+INSERT INTO schema_meta (id, version) VALUES (1, 3);
+
+CREATE TABLE spoke_cert_state (
+    spoke_id              TEXT NOT NULL,
+    name                  TEXT NOT NULL,
+    not_before            TIMESTAMP,
+    not_after             TIMESTAMP,
+    serial_number         TEXT,
+    status                TEXT NOT NULL DEFAULT 'unknown'
+                              CHECK (status IN ('unknown', 'active', 'failed')),
+    last_checkin_at       TIMESTAMP,
+    last_error            TEXT,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    last_success_at       TIMESTAMP,
+    claimed_by            TEXT,
+    claimed_at            TIMESTAMP,
+    claim_expires_at      TIMESTAMP,
+    PRIMARY KEY (spoke_id, name)
+);
+`
+
+// TestOpen_MigratesV3ToV4 is TestOpen_MigratesV2ToV3's counterpart for
+// enrollment_tokens specifically - a wholly new table rather than an
+// ALTER TABLE, but still needs schema_meta.version to end up correct and
+// the table to actually be usable afterward, not just present.
+func TestOpen_MigratesV3ToV4(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	if _, err := seed.Exec(oldV3Schema); err != nil {
+		t.Fatalf("create v3 schema: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO spoke_cert_state (spoke_id, name, status, serial_number) VALUES ('spoke-a', 'cert-a', 'active', 'pre-migration-serial')`,
+	); err != nil {
+		t.Fatalf("seed pre-migration row: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed connection: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v3 database: %v", err)
+	}
+	defer st.Close()
+
+	var version int
+	if err := st.db.QueryRow(`SELECT version FROM schema_meta WHERE id = 1`).Scan(&version); err != nil {
+		t.Fatalf("read schema version after migration: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Errorf("got schema version %d after migration, want %d", version, currentSchemaVersion)
+	}
+
+	cs, err := st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get pre-migration row after migration: %v", err)
+	}
+	if cs.SerialNumber.String != "pre-migration-serial" {
+		t.Errorf("pre-migration data lost: got serial %q, want pre-migration-serial", cs.SerialNumber.String)
+	}
+
+	// And enrollment_tokens must actually work against this migrated database.
+	if err := st.InsertEnrollmentToken("secret-a", "spoke-a", "bearer-a", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("InsertEnrollmentToken against a migrated database: %v", err)
+	}
+	if ok, err := st.RedeemEnrollmentToken("secret-a", time.Now()); err != nil || !ok {
+		t.Fatalf("RedeemEnrollmentToken against a migrated database: ok=%v err=%v, want true/nil", ok, err)
+	}
+}
+
 // TestOpen_IdempotentOnCurrentDatabase proves migrate is safe to run every
 // process start, including against a database already at the current
 // version - not just once, on first upgrade.
