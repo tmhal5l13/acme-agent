@@ -69,77 +69,10 @@ notify_timeout: 30s
 # neither endpoint exists at all.
 # status_token: "${STATUS_TOKEN}"
 
-dns_providers:
-  route53_main:
-    type: route53
-    hosted_zone_id: "" # optional; leave blank to let lego look up the zone by domain
-    region: "" # optional; leave blank to use the AWS SDK's own resolution
-    # No access_key_id/secret_access_key fields on purpose: credentials come
-    # from the standard AWS SDK credential chain (env vars, ~/.aws/credentials,
-    # or an IAM role), not from this file. This is the recommended default,
-    # and the only option needed for a single-AWS-account deployment.
-
-  # access_key_id/secret_access_key/session_token are an explicit override for
-  # when the SDK chain can't cover the use case: more than one route53_*
-  # entry needing genuinely different AWS credentials (e.g. two separate AWS
-  # accounts' hosted zones managed from one hub) - the SDK chain resolves one
-  # set of ambient credentials for the whole process, shared by every entry
-  # that doesn't override it. access_key_id/secret_access_key must be set
-  # together, or not at all; session_token is optional and only meaningful
-  # for temporary/STS-issued credentials.
-  # route53_other_account:
-  #   type: route53
-  #   access_key_id: "${ROUTE53_OTHER_ACCOUNT_ACCESS_KEY_ID}"
-  #   secret_access_key: "${ROUTE53_OTHER_ACCOUNT_SECRET_ACCESS_KEY}"
-  #   session_token: "${ROUTE53_OTHER_ACCOUNT_SESSION_TOKEN}" # optional
-
-  cloudflare_main:
-    type: cloudflare
-    api_token: "${CLOUDFLARE_API_TOKEN}"
-
-  godaddy_main:
-    type: godaddy
-    api_key: "${GODADDY_API_KEY}"
-    api_secret: "${GODADDY_API_SECRET}"
-
-  pdns_main:
-    type: pdns
-    api_url: "http://127.0.0.1:8081"
-    api_key: "${PDNS_API_KEY}"
-    server_name: "" # optional; defaults to "localhost", PowerDNS's own default virtual server ID
-
-  bind_main:
-    type: rfc2136
-    nameserver: "127.0.0.1:53" # host:port of the authoritative server to send UPDATE messages to
-    tsig_key: "${BIND_TSIG_KEY_NAME}" # the key name, not the secret
-    tsig_secret: "${BIND_TSIG_SECRET}"
-    tsig_algorithm: "hmac-sha256." # trailing dot required; matches whatever algorithm the key was generated with (see tsig-keygen)
-
-# Each spoke is one or more bearer tokens plus the exact set of
-# certificates (name + domains + which dns_providers entry to use) those
-# tokens are authorized to act on. A spoke can never request a DNS-01
-# change, due-check, or checkin for anything outside its own list here.
-#
-# tokens is a list, not a single value, specifically to support rotation:
-# add a second token alongside the first, restart the hub, switch the
-# spoke over to it, then remove the old one - see ARCHITECTURE.md "Spoke
-# token rotation". Under normal operation it holds exactly one.
-spokes:
-  freeradius-spoke:
-    tokens:
-      - "${SPOKE_FREERADIUS_TOKEN}"
-    certs:
-      - name: radius-cert
-        domains: [radius.example.com]
-        dns_provider: route53_main
-        # renew_before: 720h  # optional; overrides acme_defaults.renew_before for just this cert
-        # domain_dns_providers:  # optional; per-domain override when a cert's domains span more than one DNS backend - see ARCHITECTURE.md "Mixed DNS providers on one certificate"
-        #   radius.example.com: cloudflare_main
-
-  nginx-spoke:
-    tokens:
-      - "${SPOKE_NGINX_TOKEN}"
-    certs:
-      - name: nginx-cert
-        domains: [example.com, "*.example.com"]
-        dns_provider: cloudflare_main
+# DNS providers and spokes are NOT configured in this file - they're
+# managed through the hub's own database (internal/hubstore), via the web
+# admin UI at GET /admin (gated by status_token above) or the
+# cmd/acme-onboard / acme-hub --generate-token CLI tools. See
+# ARCHITECTURE.md "Database-backed desired state" for why, and
+# acme-hub --import-config if you're migrating a config.yaml from before
+# this change that still has spokes:/dns_providers: sections.

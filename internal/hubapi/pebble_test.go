@@ -46,9 +46,9 @@ func TestPebble_HubRelay_FullIssuance(t *testing.T) {
 	// the "pebble" dns_provider name - from the spoke's perspective this
 	// is indistinguishable from a hub relaying to a real DNS API, which is
 	// exactly the point.
-	cfg := testConfig()
-	cfg.Spokes["spoke-a"].Certs[0].DNSProvider = "pebble"
-	s := newTestServer(t, cfg, map[string]challenge.Provider{"pebble": challTestSrvProvider{}})
+	spokes := testSpokes()
+	spokes["spoke-a"].Certs[0].DNSProvider = "pebble"
+	s := newTestServer(t, testConfig(), spokes, map[string]challenge.Provider{"pebble": challTestSrvProvider{}})
 
 	hubCertPath := filepath.Join(t.TempDir(), "hub-cert.pem")
 	hubKeyPath := filepath.Join(t.TempDir(), "hub-key.pem")
@@ -110,9 +110,10 @@ func TestPebble_ClaimPreventsDuplicateIssuance(t *testing.T) {
 	pebbleCACertFile := startPebble(t)
 
 	cfg := testConfig()
-	cfg.Spokes["spoke-a"].Certs[0].DNSProvider = "pebble"
 	cfg.RenewalLeaseDuration = config.Duration(time.Minute) // comfortably longer than this test takes
-	s := newTestServer(t, cfg, map[string]challenge.Provider{"pebble": challTestSrvProvider{}})
+	spokes := testSpokes()
+	spokes["spoke-a"].Certs[0].DNSProvider = "pebble"
+	s := newTestServer(t, cfg, spokes, map[string]challenge.Provider{"pebble": challTestSrvProvider{}})
 
 	hubCertPath := filepath.Join(t.TempDir(), "hub-cert.pem")
 	hubKeyPath := filepath.Join(t.TempDir(), "hub-key.pem")

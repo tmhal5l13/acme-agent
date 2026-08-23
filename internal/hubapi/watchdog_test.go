@@ -23,7 +23,7 @@ func watchdogTestConfig(marker string) *config.HubConfig {
 
 func TestWatchdog_FlagsStaleCheckin(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, watchdogTestConfig(marker), nil)
+	s := newTestServer(t, watchdogTestConfig(marker), testSpokes(), nil)
 
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(90*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
@@ -43,7 +43,7 @@ func TestWatchdog_FlagsStaleCheckin(t *testing.T) {
 
 func TestWatchdog_DoesNotRenotifyEveryPass(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, watchdogTestConfig(marker), nil)
+	s := newTestServer(t, watchdogTestConfig(marker), testSpokes(), nil)
 
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(90*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
@@ -63,7 +63,7 @@ func TestWatchdog_DoesNotRenotifyEveryPass(t *testing.T) {
 
 func TestWatchdog_RecoversWhenCheckinArrives(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, watchdogTestConfig(marker), nil)
+	s := newTestServer(t, watchdogTestConfig(marker), testSpokes(), nil)
 
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(90*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
@@ -95,7 +95,7 @@ func TestWatchdog_RecoversWhenCheckinArrives(t *testing.T) {
 // gets naturally.
 func TestWatchdog_NeverCheckedInGetsAGracePeriod(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
-	s := newTestServer(t, watchdogTestConfig(marker), nil)
+	s := newTestServer(t, watchdogTestConfig(marker), testSpokes(), nil)
 	// Deliberately no checkin at all.
 
 	state := newWatchdogState()
@@ -117,7 +117,7 @@ func TestWatchdog_NeverCheckedInGetsAGracePeriod(t *testing.T) {
 func TestWatchdog_FreshCheckinNeverFlagged(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "marker")
 	cfg := notifyTestConfig(marker) // production-realistic 2h WatchdogStaleAfter, not the test override
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, testSpokes(), nil)
 
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(90*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)

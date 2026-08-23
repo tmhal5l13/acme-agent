@@ -55,8 +55,25 @@ const currentSchemaVersion = 5
 // SQLITE_BUSY ("database is locked") rather than waiting for it — a real
 // risk here since every spoke checkin is a write, and this hub may be
 // serving several spokes at once.
+//
+// _txlock=immediate matters for the same reason, but for a different
+// failure mode: a Go sql.Tx (used by every multi-statement write in this
+// package — CreateSpoke, DeleteSpoke, RemoveSpokeToken, UpsertSpokeCert —
+// as opposed to CheckinActive/Claim's single-statement db.Exec calls)
+// defaults to SQLite's own "deferred" transaction mode, which only
+// acquires the write lock on that transaction's first actual write
+// statement, not at BEGIN. Two such transactions can each successfully
+// begin and run their own read statements first (as these all do, to
+// check what they're about to write against), then both try to upgrade
+// to the write lock at the same moment — a lock-upgrade conflict busy_timeout
+// does not retry, and modernc.org/sqlite surfaces it as an immediate
+// SQLITE_BUSY. _txlock=immediate makes every sql.Tx acquire the write
+// lock at BEGIN instead, so contention shows up as ordinary busy_timeout-retried
+// waiting on BEGIN itself, not an unretried mid-transaction upgrade
+// failure — the standard fix for this well-documented SQLite behavior in
+// any Go application issuing concurrent multi-statement writes.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

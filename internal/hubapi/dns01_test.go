@@ -13,7 +13,7 @@ import (
 
 func TestDNS01Present_AuthorizedDomain(t *testing.T) {
 	fake := &fakeDNSProvider{}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
@@ -35,7 +35,7 @@ func TestDNS01Present_WildcardDomainAuthorized(t *testing.T) {
 	// for a wildcard cert's DNS-01 challenge (domain includes the "*."
 	// prefix), not some derived/stripped form of it.
 	fake := &fakeDNSProvider{}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "*.example.com", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
@@ -116,14 +116,14 @@ func TestResolveDNSProvider_UsesOverrideOrFallsBackToDefault(t *testing.T) {
 // the actual scenario this feature exists for (one certificate whose SAN
 // list spans domains on genuinely different DNS backends).
 func TestDNS01Present_DomainOverrideUsesDifferentProvider(t *testing.T) {
-	cfg := testConfig()
-	spoke := cfg.Spokes["spoke-a"]
+	spokes := testSpokes()
+	spoke := spokes["spoke-a"]
 	spoke.Certs[0].DomainDNSProviders = map[string]string{"*.example.com": "fake2"}
-	cfg.Spokes["spoke-a"] = spoke
+	spokes["spoke-a"] = spoke
 
 	fakeDefault := &fakeDNSProvider{}
 	fakeOverride := &fakeDNSProvider{}
-	s := newTestServer(t, cfg, map[string]challenge.Provider{"fake": fakeDefault, "fake2": fakeOverride})
+	s := newTestServer(t, testConfig(), spokes, map[string]challenge.Provider{"fake": fakeDefault, "fake2": fakeOverride})
 
 	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
@@ -155,7 +155,7 @@ func TestDNS01Present_DomainOverrideUsesDifferentProvider(t *testing.T) {
 // challenge.Provider rather than calling domainAuthorized directly.
 func TestDNS01Present_DomainNormalization_EndToEnd(t *testing.T) {
 	fake := &fakeDNSProvider{}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "EXAMPLE.COM.", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
@@ -167,7 +167,7 @@ func TestDNS01Present_DomainNormalization_EndToEnd(t *testing.T) {
 
 func TestDNS01Present_UnauthorizedDomainRejected(t *testing.T) {
 	fake := &fakeDNSProvider{}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "evil.example.net", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
@@ -182,7 +182,7 @@ func TestDNS01Present_UnauthorizedDomainRejected(t *testing.T) {
 
 func TestDNS01Cleanup_AuthorizedDomain(t *testing.T) {
 	fake := &fakeDNSProvider{}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/cleanup", "token-a", body)
@@ -197,7 +197,7 @@ func TestDNS01Cleanup_AuthorizedDomain(t *testing.T) {
 
 func TestDNS01Present_ProviderErrorReturns502(t *testing.T) {
 	fake := &fakeDNSProvider{presentErr: errors.New("route53 api unavailable")}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/dns01/present", "token-a", body)
@@ -222,7 +222,7 @@ func (blockingDNSProvider) CleanUp(domain, token, keyAuth string) error { return
 func TestDNS01Present_ProviderTimeoutReturnsError(t *testing.T) {
 	cfg := testConfig()
 	cfg.DNSProviderTimeout = config.Duration(10 * time.Millisecond)
-	s := newTestServer(t, cfg, map[string]challenge.Provider{"fake": blockingDNSProvider{}})
+	s := newTestServer(t, cfg, testSpokes(), map[string]challenge.Provider{"fake": blockingDNSProvider{}})
 
 	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
 
@@ -252,7 +252,7 @@ func TestDNS01Present_UnknownCertNameRejectedBeforeReachingProvider(t *testing.T
 	// cert name this spoke doesn't own must never reach the DNS provider,
 	// regardless of what domain is in the body.
 	fake := &fakeDNSProvider{}
-	s := newTestServer(t, testConfig(), map[string]challenge.Provider{"fake": fake})
+	s := newTestServer(t, testConfig(), testSpokes(), map[string]challenge.Provider{"fake": fake})
 
 	body, _ := json.Marshal(dns01Request{Domain: "example.com", Token: "tok", KeyAuth: "tok.auth"})
 	resp := doRequest(s, "POST", "/v1/certs/not-my-cert/dns01/present", "token-a", body)

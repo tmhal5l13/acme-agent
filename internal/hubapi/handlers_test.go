@@ -21,7 +21,7 @@ func doRequest(s *Server, method, path, token string, body []byte) *httptest.Res
 }
 
 func TestAuth_NoToken(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "", nil)
 	if resp.Code != 401 {
 		t.Fatalf("got status %d, want 401", resp.Code)
@@ -29,7 +29,7 @@ func TestAuth_NoToken(t *testing.T) {
 }
 
 func TestAuth_UnknownToken(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "not-a-real-token", nil)
 	if resp.Code != 401 {
 		t.Fatalf("got status %d, want 401", resp.Code)
@@ -37,7 +37,7 @@ func TestAuth_UnknownToken(t *testing.T) {
 }
 
 func TestAuth_ValidTokenWrongCertName(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	resp := doRequest(s, "GET", "/v1/certs/not-my-cert/due", "token-a", nil)
 	if resp.Code != 403 {
 		t.Fatalf("got status %d, want 403", resp.Code)
@@ -45,7 +45,7 @@ func TestAuth_ValidTokenWrongCertName(t *testing.T) {
 }
 
 func TestCheckin_ValidRequestStoresState(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 
 	notAfter := time.Now().Add(60 * 24 * time.Hour).UTC()
 	body, _ := json.Marshal(checkinRequest{
@@ -80,7 +80,7 @@ func TestCheckin_ValidRequestStoresState(t *testing.T) {
 // the hub forget the real expiry of whatever certificate the spoke still
 // has installed and still valid.
 func TestCheckin_FailedCheckinDoesNotErasePriorCertFields(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 
 	notAfter := time.Now().Add(60 * 24 * time.Hour).UTC()
 	activeBody, _ := json.Marshal(checkinRequest{
@@ -126,7 +126,7 @@ func TestCheckin_FailedCheckinDoesNotErasePriorCertFields(t *testing.T) {
 }
 
 func TestCheckin_InvalidBody(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", []byte("not json"))
 	if resp.Code != 400 {
 		t.Fatalf("got status %d, want 400", resp.Code)
@@ -137,7 +137,7 @@ func TestCheckin_InvalidBody(t *testing.T) {
 // into handleCheckin actually bounds what it reads, rather than buffering
 // an arbitrarily large body from an authenticated-but-misbehaving spoke.
 func TestCheckin_OversizedBodyRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	oversized := bytes.Repeat([]byte("a"), maxRequestBodyBytes+1)
 	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", oversized)
 	if resp.Code != 400 {
@@ -146,7 +146,7 @@ func TestCheckin_OversizedBodyRejected(t *testing.T) {
 }
 
 func TestCheckin_UnknownStatusRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	body, _ := json.Marshal(checkinRequest{
 		Domains: []string{"example.com"}, NotBefore: time.Now(), NotAfter: time.Now().Add(60 * 24 * time.Hour),
 		Serial: "abc123", Status: "banana",
@@ -158,7 +158,7 @@ func TestCheckin_UnknownStatusRejected(t *testing.T) {
 }
 
 func TestCheckin_ActiveWithoutSerialRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	body, _ := json.Marshal(checkinRequest{
 		Domains: []string{"example.com"}, NotBefore: time.Now(), NotAfter: time.Now().Add(60 * 24 * time.Hour),
 		Status: "active", // Serial deliberately omitted
@@ -173,7 +173,7 @@ func TestCheckin_ActiveWithoutSerialRejected(t *testing.T) {
 // validity window that couldn't correspond to any real certificate,
 // regardless of what NotAfter alone might suggest about renewal timing.
 func TestCheckin_ActiveWithNotBeforeNotAfterNonsenseRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	now := time.Now()
 	body, _ := json.Marshal(checkinRequest{
 		Domains: []string{"example.com"}, NotBefore: now, NotAfter: now.Add(-time.Hour), // after before before
@@ -202,7 +202,7 @@ func TestCheckin_ImplausibleNotAfterRejected(t *testing.T) {
 		{"years in the future", 10 * 365 * 24 * time.Hour, true},
 	}
 	for _, c := range cases {
-		s := newTestServer(t, testConfig(), nil)
+		s := newTestServer(t, testConfig(), testSpokes(), nil)
 		now := time.Now()
 		body, _ := json.Marshal(checkinRequest{
 			Domains: []string{"example.com"}, NotBefore: now, NotAfter: now.Add(c.lifetime),
@@ -223,7 +223,7 @@ func TestCheckin_ImplausibleNotAfterRejected(t *testing.T) {
 // reports "failed" checkins with a zero NotBefore/NotAfter/Serial (there's
 // no newly-issued certificate to describe), and that must keep working.
 func TestCheckin_FailedStatusDoesNotRequireCertFields(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	body, _ := json.Marshal(checkinRequest{
 		Domains: []string{"example.com"}, Status: "failed", Error: "dns01 present failed",
 	})
@@ -234,7 +234,7 @@ func TestCheckin_FailedStatusDoesNotRequireCertFields(t *testing.T) {
 }
 
 func TestDue_NeverCheckedIn(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
 	if resp.Code != 200 {
 		t.Fatalf("got status %d, want 200", resp.Code)
@@ -249,7 +249,7 @@ func TestDue_NeverCheckedIn(t *testing.T) {
 }
 
 func TestDue_FarFutureExpiryIsNotDue(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(90*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestDue_FarFutureExpiryIsNotDue(t *testing.T) {
 }
 
 func TestDue_NearExpiryIsDue(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestDue_NearExpiryIsDue(t *testing.T) {
 // an actual, unexpired claim - not just a boolean response with no
 // tracked state backing it.
 func TestDue_ClaimsRenewalLeaseWhenDue(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestDue_ClaimsRenewalLeaseWhenDue(t *testing.T) {
 // second /due call for a cert that's already claimed (and would otherwise
 // be due) must report due=false, not let a second caller also proceed.
 func TestDue_SecondCallWhileClaimedReportsNotDue(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestDue_SecondCallWhileClaimedReportsNotDue(t *testing.T) {
 // again later must be claimable again, not stuck until RenewalLeaseDuration
 // elapses for no reason.
 func TestDue_ClaimReleasedByCheckinAllowsAnotherClaim(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -363,15 +363,15 @@ func TestDue_ClaimReleasedByCheckinAllowsAnotherClaim(t *testing.T) {
 }
 
 func TestDue_PerCertRenewBeforeOverridesDefault(t *testing.T) {
-	cfg := testConfig()
 	// Override just this cert's renewal policy to 1 hour, far shorter than
 	// the 30-day default — a cert with 5 days left should now read as NOT
 	// due, proving the override actually takes effect over the default.
-	spoke := cfg.Spokes["spoke-a"]
+	spokes := testSpokes()
+	spoke := spokes["spoke-a"]
 	spoke.Certs[0].RenewBefore = config.Duration(time.Hour)
-	cfg.Spokes["spoke-a"] = spoke
+	spokes["spoke-a"] = spoke
 
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, testConfig(), spokes, nil)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(5*24*time.Hour), "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestDue_JitterShiftsThresholdEarlierNeverLater(t *testing.T) {
 
 	cfgWithJitter := testConfig()
 	cfgWithJitter.ACMEDefaults.RenewalJitter = config.Duration(48 * time.Hour)
-	sWithJitter := newTestServer(t, cfgWithJitter, nil)
+	sWithJitter := newTestServer(t, cfgWithJitter, testSpokes(), nil)
 	if err := sWithJitter.store.CheckinActive("spoke-a", "cert-a", time.Now(), notAfter, "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestDue_JitterShiftsThresholdEarlierNeverLater(t *testing.T) {
 	}
 
 	cfgNoJitter := testConfig() // RenewalJitter left zero
-	sNoJitter := newTestServer(t, cfgNoJitter, nil)
+	sNoJitter := newTestServer(t, cfgNoJitter, testSpokes(), nil)
 	if err := sNoJitter.store.CheckinActive("spoke-a", "cert-a", time.Now(), notAfter, "s1"); err != nil {
 		t.Fatalf("seed checkin: %v", err)
 	}

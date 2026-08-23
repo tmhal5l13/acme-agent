@@ -63,7 +63,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := s.state.Load()
-	spoke, exists := state.cfg.Spokes[spokeID]
+	spoke, exists := state.spokes[spokeID]
 	if !exists {
 		slog.Warn("enroll: spoke not yet in hub config", "spoke", spokeID)
 		http.Error(w, "spoke not yet configured on the hub - add the printed hub-config snippet under spokes: and reload the hub (SIGHUP), then retry with the same token", http.StatusServiceUnavailable)

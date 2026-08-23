@@ -8,25 +8,31 @@ import (
 	"github.com/tmhal5l13/acme-agent/config"
 )
 
-// statusTestConfig is testConfig with a status_token set and a second
-// spoke/cert, so status tests can prove the endpoint is genuinely
-// fleet-wide (spans spokes), not just "whatever a single spoke's own
-// token would already see" - see HubConfig.StatusToken's doc comment on
-// why that's the actual point of a separate credential.
+// statusTestConfig is testConfig with a status_token set.
 func statusTestConfig() *config.HubConfig {
 	cfg := testConfig()
 	cfg.StatusToken = "status-token"
-	cfg.Spokes["spoke-b"] = config.SpokeEntry{
+	return cfg
+}
+
+// statusTestSpokes is testSpokes plus a second spoke/cert, so status
+// tests can prove the endpoint is genuinely fleet-wide (spans spokes),
+// not just "whatever a single spoke's own token would already see" - see
+// HubConfig.StatusToken's doc comment on why that's the actual point of
+// a separate credential.
+func statusTestSpokes() map[string]config.SpokeEntry {
+	spokes := testSpokes()
+	spokes["spoke-b"] = config.SpokeEntry{
 		Tokens: []string{"token-b"},
 		Certs: []config.SpokeCertConfig{
 			{Name: "cert-b", Domains: []string{"other.example.com"}, DNSProvider: "fake"},
 		},
 	}
-	return cfg
+	return spokes
 }
 
 func TestHandleStatus_RequiresStatusToken(t *testing.T) {
-	s := newTestServer(t, statusTestConfig(), nil)
+	s := newTestServer(t, statusTestConfig(), statusTestSpokes(), nil)
 
 	resp := doRequest(s, "GET", "/v1/status", "", nil)
 	if resp.Code != 401 {
@@ -49,7 +55,7 @@ func TestHandleStatus_RequiresStatusToken(t *testing.T) {
 // rejecting, when status_token is left unset.
 func TestHandleStatus_NotRegisteredWithoutStatusToken(t *testing.T) {
 	cfg := testConfig() // StatusToken deliberately left empty
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, testSpokes(), nil)
 
 	resp := doRequest(s, "GET", "/v1/status", "anything", nil)
 	if resp.Code != 404 {
@@ -58,8 +64,7 @@ func TestHandleStatus_NotRegisteredWithoutStatusToken(t *testing.T) {
 }
 
 func TestHandleStatus_ReturnsAllConfiguredCerts(t *testing.T) {
-	cfg := statusTestConfig()
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, statusTestConfig(), statusTestSpokes(), nil)
 
 	notAfter := time.Now().Add(60 * 24 * time.Hour)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), notAfter, "serial-a"); err != nil {
@@ -103,8 +108,7 @@ func TestHandleStatus_ReturnsAllConfiguredCerts(t *testing.T) {
 }
 
 func TestHandleStatus_ReflectsFailureStreak(t *testing.T) {
-	cfg := statusTestConfig()
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, statusTestConfig(), statusTestSpokes(), nil)
 
 	if err := s.store.CheckinFailed("spoke-a", "cert-a", nil, 4); err != nil {
 		t.Fatalf("seed failed checkin: %v", err)

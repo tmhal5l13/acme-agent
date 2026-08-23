@@ -12,8 +12,8 @@ import "testing"
 // auth.go for that argument - it only proves the functional behavior is
 // what's claimed.
 func TestAuth_NearMissTokenRejected(t *testing.T) {
-	s := newTestServer(t, testConfig(), nil)
-	// testConfig's real token is "token-a".
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
+	// testSpokes's real token is "token-a".
 	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-b", nil)
 	if resp.Code != 401 {
 		t.Fatalf("got status %d, want 401 for a near-miss token", resp.Code)
@@ -25,12 +25,12 @@ func TestAuth_NearMissTokenRejected(t *testing.T) {
 // (the state a rotation grace period leaves it in, see PlanRotation)
 // authenticates successfully with either one, not just the first.
 func TestAuth_EitherTokenDuringRotationAuthenticates(t *testing.T) {
-	cfg := testConfig()
-	spoke := cfg.Spokes["spoke-a"]
+	spokes := testSpokes()
+	spoke := spokes["spoke-a"]
 	spoke.Tokens = []string{"token-a", "token-a-new"}
-	cfg.Spokes["spoke-a"] = spoke
+	spokes["spoke-a"] = spoke
 
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, testConfig(), spokes, nil)
 
 	for _, token := range []string{"token-a", "token-a-new"} {
 		resp := doRequest(s, "GET", "/v1/certs/cert-a/due", token, nil)

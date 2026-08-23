@@ -21,7 +21,7 @@ func doBasicAuthRequest(s *Server, method, path, password string) *httptest.Resp
 }
 
 func TestHandleAdminDashboard_RequiresStatusToken(t *testing.T) {
-	s := newTestServer(t, statusTestConfig(), nil)
+	s := newTestServer(t, statusTestConfig(), statusTestSpokes(), nil)
 
 	resp := doBasicAuthRequest(s, "GET", "/admin", "")
 	if resp.Code != 401 {
@@ -51,7 +51,7 @@ func TestHandleAdminDashboard_RequiresStatusToken(t *testing.T) {
 // TestHandleStatus_NotRegisteredWithoutStatusToken exactly.
 func TestHandleAdminDashboard_NotRegisteredWithoutStatusToken(t *testing.T) {
 	cfg := testConfig() // StatusToken deliberately left empty
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, statusTestSpokes(), nil)
 
 	resp := doBasicAuthRequest(s, "GET", "/admin", "anything")
 	if resp.Code != 404 {
@@ -60,7 +60,7 @@ func TestHandleAdminDashboard_NotRegisteredWithoutStatusToken(t *testing.T) {
 }
 
 func TestHandleAdminDashboard_ContentTypeIsHTML(t *testing.T) {
-	s := newTestServer(t, statusTestConfig(), nil)
+	s := newTestServer(t, statusTestConfig(), statusTestSpokes(), nil)
 
 	resp := doBasicAuthRequest(s, "GET", "/admin", "status-token")
 	if resp.Code != 200 {
@@ -78,7 +78,7 @@ func TestHandleAdminDashboard_ContentTypeIsHTML(t *testing.T) {
 // adminEntries's behavior, not just its name.
 func TestHandleAdminDashboard_ShowsConfiguredButNeverCheckedInCert(t *testing.T) {
 	cfg := statusTestConfig()
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, statusTestSpokes(), nil)
 
 	notAfter := time.Now().Add(60 * 24 * time.Hour)
 	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), notAfter, "serial-a"); err != nil {
@@ -108,7 +108,7 @@ func TestHandleAdminDashboard_ShowsConfiguredButNeverCheckedInCert(t *testing.T)
 // containing HTML must render escaped, not as live markup.
 func TestHandleAdminDashboard_EscapesUntrustedFields(t *testing.T) {
 	cfg := statusTestConfig()
-	s := newTestServer(t, cfg, nil)
+	s := newTestServer(t, cfg, statusTestSpokes(), nil)
 
 	if err := s.store.CheckinFailed("spoke-a", "cert-a", errors.New("<script>alert(1)</script>"), 1); err != nil {
 		t.Fatalf("seed checkin: %v", err)
