@@ -124,7 +124,7 @@ just set: a server that can't negotiate above TLS 1.2 fails the handshake.
 | Package | Used by | Purpose |
 |---|---|---|
 | `config` | both | YAML config loading/validation for both binaries — `HubConfig`/`LoadHubConfig` and `SpokeConfig`/`LoadSpokeConfig`, sharing a `Duration` type and `${VAR}` env-expansion for secrets |
-| `internal/hubapi` | hub | HTTP handlers: bearer-token auth, per-spoke domain authorization, checkin, due, dns01 relay, notify_hook transition detection |
+| `internal/hubapi` | hub | HTTP handlers: bearer-token auth, per-spoke domain authorization, checkin, due, dns01 relay, notify_hook transition detection, read-only admin dashboard |
 | `internal/hubstore` | hub | SQLite: what spokes have last reported (`spoke_cert_state`) — observed state only; desired state (domains, DNS provider, policy) lives in the hub's config, not the DB. Tracks a `schema_meta.version` and migrates an existing database forward on `Open` — see "Renewal health tracking" below |
 | `internal/dnsprovider` | hub | Builds a real `lego` DNS-01 `challenge.Provider` (Route53, Cloudflare, GoDaddy, PowerDNS) from config. The one package that ever touches DNS provider credentials |
 | `internal/selfsigned` | hub | Generates the hub's self-signed TLS certificate on first startup — see "TLS" above |
@@ -834,6 +834,51 @@ certificate that's configured (`cfg.Spokes[*].Certs`) but has never once
 checked in still appears, as `status: "unknown"` (`spoke_cert_state`'s own
 default), rather than silently missing from the response just because no
 row exists for it yet.
+
+A server-rendered HTML view of this same data — for a human opening a
+browser rather than a monitoring tool — is available at `GET /admin`; see
+"Web admin UI" below.
+
+## Web admin UI
+
+`GET /admin` serves a read-only, server-rendered HTML page with the exact
+same fleet-wide certificate data `GET /v1/status` reports as JSON — both
+handlers share `internal/hubapi.adminEntries`, the merge-observed-with-
+desired-state logic factored out of `handleStatus`, so the two views can
+never structurally diverge on what counts as "configured" or "unknown."
+
+Gated by the same `status_token` as `/v1/status` (registered in the same
+`Handler()` conditional, so leaving `status_token` unset disables both
+endpoints identically — 404, not 401, when unconfigured), but presented
+differently: `/admin` uses HTTP Basic Auth (`internal/hubapi.authorizeAdmin`)
+rather than a bearer header, since a browser needs a native credential
+prompt to open the page directly — unlike `handleStatus`'s check, a failed
+attempt here sets `WWW-Authenticate: Basic realm="acme-hub admin"`, which
+is what actually triggers that prompt. The username field is ignored;
+`status_token` is the password. Basic Auth over a login-form/session-cookie
+was a deliberate choice, not just the simplest option: browsers resend
+cached Basic Auth credentials automatically on every subsequent
+same-origin request, including future `POST`s — the property that lets a
+later write-capable phase (see below) reuse this exact auth mechanism
+without new session infrastructure.
+
+The page is plain HTML rendered via Go's `html/template` (not
+`text/template` — load-bearing, since it auto-escapes fields that can
+carry spoke-reported text, like a checkin's error string) from an inline
+template constant in `internal/hubapi/admin.go`, with no JavaScript at
+all: it re-fetches itself every 30s via `<meta http-equiv="refresh">`
+rather than polling from client-side JS, so this phase has no fetch/JS
+surface that would ever need to hold the auth credential itself.
+
+**Future growth.** This phase is deliberately read-only. Write actions
+(add a spoke, rotate a token, trigger a config reload) would extend this
+the same way the API itself is built — narrow, purpose-built `POST
+/admin/...` handlers (matching the existing `/v1/certs/{name}/dns01/present`-style
+precedent over a generic REST surface) reusing `authorizeAdmin` unchanged,
+since Basic Auth credentials already carry over to `POST`s with no new
+auth work. Whether `status_token`/`StatusToken` should be renamed (e.g.
+`admin_token`) once it grants mutation, not just read access, is an open
+question for that future work — deliberately not resolved here.
 
 ## Hub-side staleness watchdog
 
