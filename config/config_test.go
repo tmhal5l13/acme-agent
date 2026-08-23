@@ -101,7 +101,7 @@ func TestDuration_RejectsNegative(t *testing.T) {
 func TestExpandEnv_OnlyExpandsBracedVars(t *testing.T) {
 	t.Setenv("ACME_AGENT_TEST_VAR", "expanded-value")
 
-	got, err := expandEnv("braced: ${ACME_AGENT_TEST_VAR} bare: $ACME_AGENT_TEST_VAR")
+	got, err := expandEnv("braced: ${ACME_AGENT_TEST_VAR} bare: $ACME_AGENT_TEST_VAR", osEnvSource)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestExpandEnv_UnsetBracedVarErrors(t *testing.T) {
 		t.Fatal("test precondition violated: ACME_AGENT_TEST_DEFINITELY_UNSET is set in this environment")
 	}
 
-	_, err := expandEnv("token: ${ACME_AGENT_TEST_DEFINITELY_UNSET}")
+	_, err := expandEnv("token: ${ACME_AGENT_TEST_DEFINITELY_UNSET}", osEnvSource)
 	if err == nil {
 		t.Fatal("expected an error for an unset env var, got nil")
 	}
@@ -138,7 +138,7 @@ func TestExpandEnv_IgnoresCommentedOutLines(t *testing.T) {
 		t.Fatal("test precondition violated: ACME_AGENT_TEST_DEFINITELY_UNSET is set in this environment")
 	}
 
-	got, err := expandEnv("real: value\n  # commented_out: \"${ACME_AGENT_TEST_DEFINITELY_UNSET}\"\n")
+	got, err := expandEnv("real: value\n  # commented_out: \"${ACME_AGENT_TEST_DEFINITELY_UNSET}\"\n", osEnvSource)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -220,6 +220,220 @@ func TestLoadHubConfig_ExampleFileStillLoads(t *testing.T) {
 	path := repoPath(t, "deploy", "hub-config.example.yaml")
 	if _, err := LoadHubConfig(path); err != nil {
 		t.Fatalf("LoadHubConfig(%s): %v", path, err)
+	}
+}
+
+func TestParseEnvFile_ParsesKeyValueLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.env")
+	content := "FOO=bar\n# a comment\n\nBAZ=qux with spaces\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	vars, err := parseEnvFile(path)
+	if err != nil {
+		t.Fatalf("parseEnvFile: %v", err)
+	}
+	want := map[string]string{"FOO": "bar", "BAZ": "qux with spaces"}
+	if len(vars) != len(want) {
+		t.Fatalf("got %v, want %v", vars, want)
+	}
+	for k, v := range want {
+		if vars[k] != v {
+			t.Errorf("got %s=%q, want %q", k, vars[k], v)
+		}
+	}
+}
+
+func TestParseEnvFile_RejectsMalformedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.env")
+	if err := os.WriteFile(path, []byte("not-a-valid-line\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	if _, err := parseEnvFile(path); err == nil {
+		t.Fatal("expected an error for a line with no '=', got nil")
+	}
+}
+
+// TestFileEnvSource_FileValueTakesPrecedenceOverProcessEnv proves the
+// documented precedence directly: when a name exists in both the file
+// and the process's own environment, the file's value wins - the file is
+// meant to reflect the operator's current intent, which for a reload is
+// exactly the thing that might have just changed.
+func TestFileEnvSource_FileValueTakesPrecedenceOverProcessEnv(t *testing.T) {
+	t.Setenv("ACME_AGENT_TEST_PRECEDENCE", "from-process-env")
+
+	path := filepath.Join(t.TempDir(), "test.env")
+	if err := os.WriteFile(path, []byte("ACME_AGENT_TEST_PRECEDENCE=from-file\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	env, err := fileEnvSource(path)
+	if err != nil {
+		t.Fatalf("fileEnvSource: %v", err)
+	}
+	got, ok := env("ACME_AGENT_TEST_PRECEDENCE")
+	if !ok || got != "from-file" {
+		t.Errorf("got (%q, %v), want (\"from-file\", true)", got, ok)
+	}
+}
+
+// TestFileEnvSource_FallsBackToProcessEnvForNamesNotInFile proves the
+// file isn't a hard replacement for the process environment - only an
+// enhancement layered on top, so a var set some other way (e.g. a plain
+// systemd Environment= line, not EnvironmentFile=) still resolves.
+func TestFileEnvSource_FallsBackToProcessEnvForNamesNotInFile(t *testing.T) {
+	t.Setenv("ACME_AGENT_TEST_FALLBACK", "from-process-env")
+
+	path := filepath.Join(t.TempDir(), "test.env")
+	if err := os.WriteFile(path, []byte("SOME_OTHER_VAR=irrelevant\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	env, err := fileEnvSource(path)
+	if err != nil {
+		t.Fatalf("fileEnvSource: %v", err)
+	}
+	got, ok := env("ACME_AGENT_TEST_FALLBACK")
+	if !ok || got != "from-process-env" {
+		t.Errorf("got (%q, %v), want (\"from-process-env\", true)", got, ok)
+	}
+}
+
+// TestFileEnvSource_MissingFileFallsBackToOSEnvSource proves a
+// nonexistent env file path isn't an error - not every deployment
+// necessarily uses one.
+func TestFileEnvSource_MissingFileFallsBackToOSEnvSource(t *testing.T) {
+	t.Setenv("ACME_AGENT_TEST_NO_FILE", "still-works")
+
+	env, err := fileEnvSource(filepath.Join(t.TempDir(), "does-not-exist.env"))
+	if err != nil {
+		t.Fatalf("fileEnvSource: %v", err)
+	}
+	got, ok := env("ACME_AGENT_TEST_NO_FILE")
+	if !ok || got != "still-works" {
+		t.Errorf("got (%q, %v), want (\"still-works\", true)", got, ok)
+	}
+}
+
+// TestFileEnvSource_UnreadableFileFallsBackToOSEnvSource proves a real
+// permission error (not just a missing file) also degrades gracefully to
+// osEnvSource rather than erroring outright - the case that matters in
+// production if the hub's SupplementaryGroups grant (see
+// ARCHITECTURE.md "Config hot-reload") is missing or misconfigured: the
+// hub should still start and still reload, just without seeing variables
+// added to the file since the process started, not fail outright.
+func TestFileEnvSource_UnreadableFileFallsBackToOSEnvSource(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which bypasses file permission checks entirely - this test can't observe a permission error")
+	}
+	t.Setenv("ACME_AGENT_TEST_UNREADABLE", "still-works")
+
+	path := filepath.Join(t.TempDir(), "test.env")
+	if err := os.WriteFile(path, []byte("SOME_VAR=value\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod env file: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(path, 0o600) }) // so t.TempDir() can clean it up
+
+	env, err := fileEnvSource(path)
+	if err != nil {
+		t.Fatalf("fileEnvSource: %v", err)
+	}
+	got, ok := env("ACME_AGENT_TEST_UNREADABLE")
+	if !ok || got != "still-works" {
+		t.Errorf("got (%q, %v), want (\"still-works\", true)", got, ok)
+	}
+}
+
+// TestLoadHubConfig_ResolvesVariableOnlyPresentInEnvFile is the real
+// regression test: a ${VAR} resolved purely from acme-hub.env sitting
+// next to config.yaml, never set via the process's own environment at
+// all (no t.Setenv here) - proving LoadHubConfig genuinely doesn't depend
+// on the process's environment already containing it. This is what makes
+// it safe to call LoadHubConfig again on every hub SIGHUP
+// (hubapi.Server.Reload) and actually see a spoke enrolled - or a DNS
+// provider added - after the hub process started, which the process's
+// own environment could never gain no matter how many times it's asked
+// to reload (see EnvSource's doc comment).
+func TestLoadHubConfig_ResolvesVariableOnlyPresentInEnvFile(t *testing.T) {
+	if _, ok := os.LookupEnv("ACME_AGENT_TEST_ONLY_IN_ENV_FILE"); ok {
+		t.Fatal("test precondition violated: ACME_AGENT_TEST_ONLY_IN_ENV_FILE is set in this environment")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	// hubEnvFileName, next to configPath - LoadHubConfig's documented
+	// convention, not an arbitrary name.
+	envPath := filepath.Join(dir, hubEnvFileName)
+
+	if err := os.WriteFile(configPath, []byte(`
+listen_addr: "127.0.0.1:8443"
+data_dir: /var/lib/acme-hub
+dns_providers:
+  route53_main:
+    type: route53
+spokes:
+  new-spoke:
+    tokens:
+      - "${ACME_AGENT_TEST_ONLY_IN_ENV_FILE}"
+    certs:
+      - name: new-cert
+        domains: [new.example.com]
+        dns_provider: route53_main
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(envPath, []byte("ACME_AGENT_TEST_ONLY_IN_ENV_FILE=secret-value\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+
+	cfg, err := LoadHubConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadHubConfig: %v", err)
+	}
+	if got := cfg.Spokes["new-spoke"].Tokens[0]; got != "secret-value" {
+		t.Errorf("got token %q, want secret-value", got)
+	}
+}
+
+// TestLoadHubConfig_NoEnvFileFallsBackToProcessEnv proves a deployment
+// with no acme-hub.env at all still works exactly as before this fix -
+// resolving ${VAR} from the process's own environment, same as
+// LoadSpokeConfig always has.
+func TestLoadHubConfig_NoEnvFileFallsBackToProcessEnv(t *testing.T) {
+	t.Setenv("ACME_AGENT_TEST_NO_ENV_FILE", "from-process-env")
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+listen_addr: "127.0.0.1:8443"
+data_dir: /var/lib/acme-hub
+dns_providers:
+  route53_main:
+    type: route53
+spokes:
+  spoke-a:
+    tokens:
+      - "${ACME_AGENT_TEST_NO_ENV_FILE}"
+    certs:
+      - name: cert-a
+        domains: [example.com]
+        dns_provider: route53_main
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// Deliberately no acme-hub.env written in dir.
+
+	cfg, err := LoadHubConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadHubConfig: %v", err)
+	}
+	if got := cfg.Spokes["spoke-a"].Tokens[0]; got != "from-process-env" {
+		t.Errorf("got token %q, want from-process-env", got)
 	}
 }
 

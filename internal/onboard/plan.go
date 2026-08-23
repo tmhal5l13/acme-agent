@@ -134,12 +134,29 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 
 	envVar := envVarName(req.SpokeID)
 
+	// existing.Certs carries no reload_hook — that field is spoke-local
+	// only (see SpokeLocalCertConfig) and never appears in the hub's own
+	// config, so Plan has no way to know what an existing cert's hook
+	// already is; those entries get the same commented-out placeholder a
+	// fresh cert with no ReloadHook gets, and the operator re-adds the
+	// real command by hand.
+	certs := make([]SpokeCert, 0, len(existing.Certs)+1)
+	for _, c := range existing.Certs {
+		certs = append(certs, SpokeCert{Name: c.Name, Domains: c.Domains})
+	}
+	certs = append(certs, SpokeCert{Name: req.CertName, Domains: req.Domains, ReloadHook: req.ReloadHook})
+
 	return &Result{
-		Token:           token,
-		IsNewSpoke:      !spokeExists,
-		HubEnvVarName:   envVar,
-		HubConfigYAML:   buildHubConfigYAML(req, envVar, !spokeExists),
-		SpokeConfigYAML: buildSpokeConfigYAML(req, existing.Certs),
+		Token:         token,
+		IsNewSpoke:    !spokeExists,
+		HubEnvVarName: envVar,
+		HubConfigYAML: buildHubConfigYAML(req, envVar, !spokeExists),
+		SpokeConfigYAML: BuildSpokeConfigYAML(SpokeConfigParams{
+			HubURL:         req.HubURL,
+			HubTLSCertFile: req.HubTLSCertFile,
+			ACMEEnv:        req.ACMEEnv,
+			ACMEEmail:      req.ACMEEmail,
+		}, certs),
 	}, nil
 }
 
@@ -183,39 +200,49 @@ func writeCertBlock(b *strings.Builder, req Request, indent string) {
 	}
 }
 
-// buildSpokeConfigYAML emits every certificate this spoke will manage, not
-// just the one being added: existingCerts (the spoke's other certs, already
-// on the hub) plus req's new one. Without this, regenerating the config for
-// an existing spoke's second or third certificate would silently produce a
-// spoke config.yaml that only lists the newest cert, dropping the others
-// from local management entirely.
-//
-// existingCerts carries no reload_hook — that field is spoke-local only
-// (see SpokeLocalCertConfig) and never appears in the hub's own config, so
-// Plan has no way to know what an existing cert's hook already is. Those
-// entries get the same commented-out placeholder a fresh cert with no
-// ReloadHook gets; the operator re-adds the real command by hand.
-func buildSpokeConfigYAML(req Request, existingCerts []config.SpokeCertConfig) string {
+// SpokeCert is one certificate a generated spoke config.yaml lists under
+// certs: - the shape both Plan (adding one certificate to a spoke by
+// hand, alongside whatever it already has) and acme-spoke --load-token
+// (writing a freshly-enrolled spoke's complete cert list in one shot)
+// need to describe.
+type SpokeCert struct {
+	Name       string
+	Domains    []string
+	ReloadHook string // empty prints a commented-out placeholder instead
+}
+
+// SpokeConfigParams is everything BuildSpokeConfigYAML needs beyond the
+// cert list itself.
+type SpokeConfigParams struct {
+	HubURL         string
+	HubTLSCertFile string
+	ACMEEnv        string
+	ACMEEmail      string
+}
+
+// BuildSpokeConfigYAML emits a complete spoke config.yaml listing every
+// cert in certs - not just one being added, so regenerating the config
+// for an existing spoke's second or third certificate (see Plan) doesn't
+// silently produce a config.yaml that only lists the newest one, dropping
+// the others from local management entirely.
+func BuildSpokeConfigYAML(params SpokeConfigParams, certs []SpokeCert) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "hub_url: %q\n", req.HubURL)
+	fmt.Fprintf(&b, "hub_url: %q\n", params.HubURL)
 	fmt.Fprintf(&b, "hub_token: \"${HUB_TOKEN}\"\n")
-	fmt.Fprintf(&b, "hub_tls_cert_file: %q # copy from the hub's data_dir/tls/cert.pem — verify its printed sha256 fingerprint matches\n\n", req.HubTLSCertFile)
+	fmt.Fprintf(&b, "hub_tls_cert_file: %q # copy from the hub's data_dir/tls/cert.pem — verify its printed sha256 fingerprint matches\n\n", params.HubTLSCertFile)
 	fmt.Fprintf(&b, "acme:\n")
-	fmt.Fprintf(&b, "  environment: %s\n", req.ACMEEnv)
-	fmt.Fprintf(&b, "  email: %s\n\n", req.ACMEEmail)
+	fmt.Fprintf(&b, "  environment: %s\n", params.ACMEEnv)
+	fmt.Fprintf(&b, "  email: %s\n\n", params.ACMEEmail)
 	fmt.Fprintf(&b, "data_dir: /var/lib/acme-spoke\n\n")
 	fmt.Fprintf(&b, "certs:\n")
-	for _, c := range existingCerts {
+	for _, c := range certs {
 		fmt.Fprintf(&b, "  - name: %s\n", c.Name)
 		fmt.Fprintf(&b, "    domains: [%s]\n", strings.Join(c.Domains, ", "))
-		fmt.Fprintf(&b, "    # reload_hook: \"systemctl reload nginx\" # carry over this cert's real hook from its previous config.yaml — not visible from the hub's config\n")
-	}
-	fmt.Fprintf(&b, "  - name: %s\n", req.CertName)
-	fmt.Fprintf(&b, "    domains: [%s]\n", strings.Join(req.Domains, ", "))
-	if req.ReloadHook != "" {
-		fmt.Fprintf(&b, "    reload_hook: %q\n", req.ReloadHook)
-	} else {
-		fmt.Fprintf(&b, "    # reload_hook: \"systemctl reload nginx\"\n")
+		if c.ReloadHook != "" {
+			fmt.Fprintf(&b, "    reload_hook: %q\n", c.ReloadHook)
+		} else {
+			fmt.Fprintf(&b, "    # reload_hook: \"systemctl reload nginx\"\n")
+		}
 	}
 	return b.String()
 }

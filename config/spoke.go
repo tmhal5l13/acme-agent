@@ -61,7 +61,7 @@ const (
 
 // LoadSpokeConfig reads, expands, parses, and validates a spoke's config file.
 func LoadSpokeConfig(path string) (*SpokeConfig, error) {
-	cfg, err := loadYAML[SpokeConfig](path)
+	cfg, err := loadYAML[SpokeConfig](path, osEnvSource)
 	if err != nil {
 		return nil, err
 	}

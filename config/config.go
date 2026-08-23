@@ -135,18 +135,31 @@ type DNSProviderConfig struct {
 	TSIGAlgorithm string `yaml:"tsig_algorithm"`
 }
 
-// loadYAML reads path, expands ${VAR} references against the process
-// environment, and unmarshals the result into a fresh T. Shared by
-// LoadHubConfig and LoadSpokeConfig so secret-interpolation behavior (no
-// secrets ever need to be written into the file itself) stays identical
-// across both.
-func loadYAML[T any](path string) (*T, error) {
+// EnvSource resolves one ${VAR} reference during config loading - see
+// expandEnv. LoadSpokeConfig uses osEnvSource directly (the process's own
+// environment; spokes are never hot-reloaded, so this is never a
+// problem). LoadHubConfig uses fileEnvSource instead, reading an env file
+// fresh on every call, since a long-running hub process's own
+// environment is fixed at exec time and can never gain or update a
+// variable afterward, no matter how many times it's asked to reload -
+// see ARCHITECTURE.md "Config hot-reload".
+type EnvSource func(name string) (string, bool)
+
+func osEnvSource(name string) (string, bool) {
+	return os.LookupEnv(name)
+}
+
+// loadYAML reads path, expands ${VAR} references via env, and unmarshals
+// the result into a fresh T. Shared by LoadHubConfig and LoadSpokeConfig
+// so secret-interpolation behavior (no secrets ever need to be written
+// into the file itself) stays identical across both.
+func loadYAML[T any](path string, env EnvSource) (*T, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
-	expanded, err := expandEnv(string(raw))
+	expanded, err := expandEnv(string(raw), env)
 	if err != nil {
 		return nil, err
 	}
@@ -166,14 +179,14 @@ func loadYAML[T any](path string) (*T, error) {
 // because it's followed by something that looks like an identifier.
 var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// expandEnv replaces every ${VAR} in s with the named environment
-// variable's value, leaving bare $VAR untouched. Unlike os.ExpandEnv, an
-// unset variable is an error rather than a silent expansion to "" - a
-// config that references ${CLOUDFLARE_API_TOKEN} but has a typo'd or
-// forgotten env var should fail loudly at load time with that variable's
-// name, not produce a mysteriously-empty api_token that only surfaces as
-// a less specific validate() error (or, worse, no error at all, if the
-// field it landed in happens to have no required-non-empty check).
+// expandEnv replaces every ${VAR} in s with env's value for that name,
+// leaving bare $VAR untouched. Unlike os.ExpandEnv, an unset variable is
+// an error rather than a silent expansion to "" - a config that
+// references ${CLOUDFLARE_API_TOKEN} but has a typo'd or forgotten env
+// var should fail loudly at load time with that variable's name, not
+// produce a mysteriously-empty api_token that only surfaces as a less
+// specific validate() error (or, worse, no error at all, if the field it
+// landed in happens to have no required-non-empty check).
 //
 // Lines that are entirely a YAML comment (first non-whitespace character
 // is "#") are left untouched rather than scanned for ${VAR} - both
@@ -183,7 +196,7 @@ var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 // just because it appears inside its own commented-out documentation,
 // would make that documentation pattern unusable under the stricter,
 // error-on-unset behavior above.
-func expandEnv(s string) (string, error) {
+func expandEnv(s string, env EnvSource) (string, error) {
 	lines := strings.Split(s, "\n")
 
 	var missing string
@@ -193,7 +206,7 @@ func expandEnv(s string) (string, error) {
 		}
 		lines[i] = envVarPattern.ReplaceAllStringFunc(line, func(match string) string {
 			name := envVarPattern.FindStringSubmatch(match)[1]
-			if val, ok := os.LookupEnv(name); ok {
+			if val, ok := env(name); ok {
 				return val
 			}
 			if missing == "" {
@@ -206,6 +219,69 @@ func expandEnv(s string) (string, error) {
 		return "", fmt.Errorf("environment variable %q is referenced in the config but not set", missing)
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// fileEnvSource returns an EnvSource that reads envFilePath fresh on
+// every call, falling back to the process's own environment for any name
+// not found in the file - the mechanism that makes LoadHubConfig
+// actually able to see a variable added to the file after the process
+// started (see EnvSource's doc comment for why the process's own
+// environment alone can't).
+//
+// If envFilePath doesn't exist, or can't be read due to a permissions
+// problem, this falls back to exactly osEnvSource rather than erroring -
+// not every deployment necessarily uses a separate env file (secrets
+// could be injected some other way, e.g. systemd Environment= lines
+// directly in the unit), and treating a permission error as fatal would
+// mean a misconfigured file-access grant (see ARCHITECTURE.md "Config
+// hot-reload" on the DynamicUser/SupplementaryGroups setup this depends
+// on in production) breaks the hub outright instead of degrading to
+// exactly today's behavior: reload keeps working, it just can't see
+// variables added to the file since the process started, the same
+// limitation that existed before this mechanism at all.
+func fileEnvSource(envFilePath string) (EnvSource, error) {
+	vars, err := parseEnvFile(envFilePath)
+	if err != nil {
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return osEnvSource, nil
+		}
+		return nil, fmt.Errorf("read env file %s: %w", envFilePath, err)
+	}
+	return func(name string) (string, bool) {
+		if v, ok := vars[name]; ok {
+			return v, true
+		}
+		return os.LookupEnv(name)
+	}, nil
+}
+
+// parseEnvFile reads simple KEY=VALUE lines (blank lines and lines whose
+// first non-whitespace character is "#" ignored) - the same shape a
+// systemd EnvironmentFile= uses, since this is meant to read the exact
+// file that directive already points at (see deploy/acme-hub.service).
+// Not a general-purpose env file parser: no quoting, no export keyword,
+// no variable expansion within the file itself - acme-hub.env's own
+// values (bearer tokens, DNS provider credentials) never need any of
+// that.
+func parseEnvFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	vars := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid line (expected KEY=VALUE): %q", trimmed)
+		}
+		vars[strings.TrimSpace(name)] = value
+	}
+	return vars, nil
 }
 
 // validateDomain rejects obviously malformed domain strings - not a full

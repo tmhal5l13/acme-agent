@@ -182,9 +182,34 @@ const (
 	defaultRenewalLeaseDuration = 15 * time.Minute
 )
 
-// LoadHubConfig reads, expands, parses, and validates the hub's config file.
+// hubEnvFileName is the env file LoadHubConfig reads ${VAR} values from,
+// by convention next to config.yaml itself (see deploy/acme-hub.service's
+// EnvironmentFile= and install-hub.sh, which set up exactly this layout:
+// /etc/acme-hub/config.yaml alongside /etc/acme-hub/acme-hub.env).
+const hubEnvFileName = "acme-hub.env"
+
+// LoadHubConfig reads, expands, parses, and validates the hub's config
+// file. ${VAR} references are resolved from hubEnvFileName next to path,
+// read fresh on every call - falling back to the process's own
+// environment for anything not in that file, or for the whole lookup if
+// the file doesn't exist at all (not every deployment necessarily uses
+// one).
+//
+// Reading the file fresh, rather than relying on the process's own
+// inherited environment, is what makes this safe to call again from
+// hubapi.Server.Reload on every SIGHUP: environment variables are fixed
+// at process exec time and can never gain a variable added afterward, no
+// matter how many times the process re-parses its own config - so a
+// spoke enrolled (or a DNS provider added) after the hub started would
+// otherwise never become visible without a real restart. See
+// ARCHITECTURE.md "Config hot-reload".
 func LoadHubConfig(path string) (*HubConfig, error) {
-	cfg, err := loadYAML[HubConfig](path)
+	env, err := fileEnvSource(filepath.Join(filepath.Dir(path), hubEnvFileName))
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := loadYAML[HubConfig](path, env)
 	if err != nil {
 		return nil, err
 	}
