@@ -1,16 +1,18 @@
-// Package onboard generates the matching hub-config snippet and spoke
-// config.yaml needed to add one certificate to one spoke, so the two never
-// drift out of sync by hand-editing — the actual failure mode this exists
-// to prevent (a typo'd cert name between the two files silently produces a
-// 403 the first time the spoke tries to use it).
+// Package onboard generates the bearer token and spoke config.yaml needed
+// to add one certificate to one spoke, writing the hub side straight into
+// the database (internal/hubstore) so the two sides can never drift out
+// of sync the way hand-editing two separate files used to risk (a typo'd
+// cert name between them used to silently produce a 403 the first time
+// the spoke tried to use it).
 package onboard
 
 import (
+	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 )
 
 // Request describes the certificate being onboarded.
@@ -40,27 +42,22 @@ type Request struct {
 	ACMEEnv        string // "staging" or "production"
 }
 
-// Result is everything generated for the operator to apply — Plan never
-// modifies hubCfg or any file itself.
+// Result is everything Plan produced: the spoke's bearer token (freshly
+// generated for a new spoke, reused for an existing one) and its complete
+// config.yaml — the hub side has already been written directly into
+// store by the time Plan returns, so there's nothing left to paste.
 type Result struct {
-	Token      string // bearer token: freshly generated for a new spoke, reused for an existing one
-	IsNewSpoke bool
-
-	// HubEnvVarName is the ${VAR} name referenced in HubConfigYAML — only
-	// meaningful when IsNewSpoke (an existing spoke's token, and therefore
-	// its env var, doesn't change when adding another certificate).
-	HubEnvVarName string
-
-	HubConfigYAML   string // snippet to paste into the hub's config.yaml
-	SpokeConfigYAML string // this spoke's complete config.yaml
+	Token           string
+	IsNewSpoke      bool
+	SpokeConfigYAML string
 }
 
 // validateCertRequest checks the fields common to onboarding a
 // certificate onto a spoke regardless of which flow is doing it (Plan's
-// full hand-paste workflow, or PlanEnrollment's token-based one): a spoke
+// full-request workflow, or PlanEnrollment's new-spoke-only one): a spoke
 // id, cert name, at least one domain, and that dnsProvider (and any
-// domainDNSProviders override) actually exists in the hub's config.
-func validateCertRequest(hubCfg *config.HubConfig, spokeID, certName string, domains []string, dnsProvider string, domainDNSProviders map[string]string) error {
+// domainDNSProviders override) actually exists in the hub's database.
+func validateCertRequest(store *hubstore.Store, spokeID, certName string, domains []string, dnsProvider string, domainDNSProviders map[string]string) error {
 	if spokeID == "" {
 		return fmt.Errorf("spoke id is required")
 	}
@@ -73,8 +70,10 @@ func validateCertRequest(hubCfg *config.HubConfig, spokeID, certName string, dom
 	if dnsProvider == "" {
 		return fmt.Errorf("dns provider is required")
 	}
-	if _, ok := hubCfg.DNSProviders[dnsProvider]; !ok {
-		return fmt.Errorf("dns_provider %q is not defined in the hub's config under dns_providers — add it there first", dnsProvider)
+	if exists, err := store.DNSProviderExists(dnsProvider); err != nil {
+		return fmt.Errorf("check dns_provider %q: %w", dnsProvider, err)
+	} else if !exists {
+		return fmt.Errorf("dns_provider %q is not defined on the hub — add it first", dnsProvider)
 	}
 
 	domainSet := make(map[string]bool, len(domains))
@@ -85,20 +84,22 @@ func validateCertRequest(hubCfg *config.HubConfig, spokeID, certName string, dom
 		if !domainSet[domain] {
 			return fmt.Errorf("domain_dns_providers references domain %q, which is not in Domains", domain)
 		}
-		if _, ok := hubCfg.DNSProviders[provider]; !ok {
-			return fmt.Errorf("domain_dns_providers[%s]: dns_provider %q is not defined in the hub's config under dns_providers — add it there first", domain, provider)
+		if exists, err := store.DNSProviderExists(provider); err != nil {
+			return fmt.Errorf("check dns_provider %q: %w", provider, err)
+		} else if !exists {
+			return fmt.Errorf("domain_dns_providers[%s]: dns_provider %q is not defined on the hub — add it first", domain, provider)
 		}
 	}
 	return nil
 }
 
-// Plan validates req against the hub's current config — spoke/cert name
-// collisions, and that DNSProvider actually exists — and produces a
-// Result. A new spoke gets a fresh cryptographically random token; adding
+// Plan validates req and writes it directly into store: a new spoke gets
+// a fresh cryptographically random token and its one certificate; adding
 // a certificate to a spoke that already exists reuses its existing token
-// rather than generating (and thereby invalidating) a new one.
-func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
-	if err := validateCertRequest(hubCfg, req.SpokeID, req.CertName, req.Domains, req.DNSProvider, req.DomainDNSProviders); err != nil {
+// (the first one on record) rather than generating — and thereby
+// invalidating — a new one.
+func Plan(store *hubstore.Store, req Request) (*Result, error) {
+	if err := validateCertRequest(store, req.SpokeID, req.CertName, req.Domains, req.DNSProvider, req.DomainDNSProviders); err != nil {
 		return nil, err
 	}
 	if req.HubURL == "" {
@@ -111,7 +112,14 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 		return nil, fmt.Errorf("acme environment must be %q or %q, got %q", "staging", "production", req.ACMEEnv)
 	}
 
-	existing, spokeExists := hubCfg.Spokes[req.SpokeID]
+	existing, err := store.GetSpoke(req.SpokeID)
+	spokeExists := true
+	switch {
+	case errors.Is(err, hubstore.ErrNotFound):
+		spokeExists = false
+	case err != nil:
+		return nil, fmt.Errorf("look up spoke %q: %w", req.SpokeID, err)
+	}
 
 	var token string
 	if spokeExists {
@@ -121,7 +129,7 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 			}
 		}
 		if len(existing.Tokens) == 0 {
-			return nil, fmt.Errorf("spoke %q has no tokens configured on the hub — this shouldn't be possible for an already-valid hub config", req.SpokeID)
+			return nil, fmt.Errorf("spoke %q has no tokens on the hub — this shouldn't be possible for an already-created spoke", req.SpokeID)
 		}
 		token = existing.Tokens[0] // the primary/first token; see PlanRotation for adding a second during rotation
 	} else {
@@ -130,16 +138,27 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 			return nil, err
 		}
 		token = t
+		if err := store.CreateSpoke(req.SpokeID, token); err != nil {
+			return nil, fmt.Errorf("create spoke %q: %w", req.SpokeID, err)
+		}
 	}
 
-	envVar := envVarName(req.SpokeID)
+	newCert := config.SpokeCertConfig{
+		Name:               req.CertName,
+		Domains:            req.Domains,
+		DNSProvider:        req.DNSProvider,
+		DomainDNSProviders: req.DomainDNSProviders,
+	}
+	if err := store.UpsertSpokeCert(req.SpokeID, newCert); err != nil {
+		return nil, fmt.Errorf("add cert %q to spoke %q: %w", req.CertName, req.SpokeID, err)
+	}
 
 	// existing.Certs carries no reload_hook — that field is spoke-local
 	// only (see SpokeLocalCertConfig) and never appears in the hub's own
-	// config, so Plan has no way to know what an existing cert's hook
-	// already is; those entries get the same commented-out placeholder a
-	// fresh cert with no ReloadHook gets, and the operator re-adds the
-	// real command by hand.
+	// desired state, so Plan has no way to know what an existing cert's
+	// hook already is; those entries get the same commented-out
+	// placeholder a fresh cert with no ReloadHook gets, and the operator
+	// re-adds the real command by hand.
 	certs := make([]SpokeCert, 0, len(existing.Certs)+1)
 	for _, c := range existing.Certs {
 		certs = append(certs, SpokeCert{Name: c.Name, Domains: c.Domains})
@@ -147,10 +166,8 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 	certs = append(certs, SpokeCert{Name: req.CertName, Domains: req.Domains, ReloadHook: req.ReloadHook})
 
 	return &Result{
-		Token:         token,
-		IsNewSpoke:    !spokeExists,
-		HubEnvVarName: envVar,
-		HubConfigYAML: buildHubConfigYAML(req, envVar, !spokeExists),
+		Token:      token,
+		IsNewSpoke: !spokeExists,
 		SpokeConfigYAML: BuildSpokeConfigYAML(SpokeConfigParams{
 			HubURL:         req.HubURL,
 			HubTLSCertFile: req.HubTLSCertFile,
@@ -160,49 +177,9 @@ func Plan(hubCfg *config.HubConfig, req Request) (*Result, error) {
 	}, nil
 }
 
-func envVarName(spokeID string) string {
-	sanitized := strings.NewReplacer("-", "_", " ", "_").Replace(spokeID)
-	return "SPOKE_" + strings.ToUpper(sanitized) + "_TOKEN"
-}
-
-func buildHubConfigYAML(req Request, envVar string, isNewSpoke bool) string {
-	var b strings.Builder
-	if isNewSpoke {
-		fmt.Fprintf(&b, "  %s:\n", req.SpokeID)
-		fmt.Fprintf(&b, "    tokens:\n")
-		fmt.Fprintf(&b, "      - \"${%s}\"\n", envVar)
-		fmt.Fprintf(&b, "    certs:\n")
-		writeCertBlock(&b, req, "      ")
-	} else {
-		fmt.Fprintf(&b, "  # add under spokes.%s.certs:\n", req.SpokeID)
-		writeCertBlock(&b, req, "  ")
-	}
-	return b.String()
-}
-
-func writeCertBlock(b *strings.Builder, req Request, indent string) {
-	fmt.Fprintf(b, "%s- name: %s\n", indent, req.CertName)
-	fmt.Fprintf(b, "%s  domains: [%s]\n", indent, strings.Join(req.Domains, ", "))
-	fmt.Fprintf(b, "%s  dns_provider: %s\n", indent, req.DNSProvider)
-	if len(req.DomainDNSProviders) > 0 {
-		// Sorted rather than range order, which Go randomizes per-run —
-		// this snippet gets pasted/logged/diffed by a human, and stable
-		// output matters more here than it would for machine-only YAML.
-		domains := make([]string, 0, len(req.DomainDNSProviders))
-		for d := range req.DomainDNSProviders {
-			domains = append(domains, d)
-		}
-		sort.Strings(domains)
-		fmt.Fprintf(b, "%s  domain_dns_providers:\n", indent)
-		for _, d := range domains {
-			fmt.Fprintf(b, "%s    %s: %s\n", indent, d, req.DomainDNSProviders[d])
-		}
-	}
-}
-
 // SpokeCert is one certificate a generated spoke config.yaml lists under
-// certs: - the shape both Plan (adding one certificate to a spoke by
-// hand, alongside whatever it already has) and acme-spoke --load-token
+// certs: - the shape both Plan (adding one certificate to a spoke,
+// alongside whatever it already has) and acme-spoke --load-token
 // (writing a freshly-enrolled spoke's complete cert list in one shot)
 // need to describe.
 type SpokeCert struct {
@@ -263,13 +240,16 @@ type EnrollmentRequest struct {
 	DomainDNSProviders map[string]string
 	// HubURL is where the new spoke will dial to reach the hub - embedded
 	// directly in the printed enrollment token (see internal/enrolltoken),
-	// not just the hub-config snippet, so acme-spoke --load-token needs
-	// nothing beyond that one token string.
+	// not just written into the spoke config.yaml it eventually generates,
+	// so acme-spoke --load-token needs nothing beyond that one token
+	// string.
 	HubURL string
 }
 
-// EnrollmentPlan is what PlanEnrollment generates for the operator to
-// apply and hand off.
+// EnrollmentPlan is what PlanEnrollment generates for the caller to hand
+// off to the new spoke - the hub side (spoke, its token, its one
+// certificate) has already been written directly into store by the time
+// PlanEnrollment returns.
 type EnrollmentPlan struct {
 	// BearerToken is the new spoke's real, permanent bearer token -
 	// stored (via hubstore.Store.InsertEnrollmentToken, by the caller,
@@ -280,29 +260,26 @@ type EnrollmentPlan struct {
 	// (see internal/hubstore.Store.InsertEnrollmentToken) and embed in
 	// the token handed to the new spoke - see internal/enrolltoken.
 	EnrollmentSecret string
-	// HubEnvVarName is the ${VAR} name referenced in HubConfigYAML.
-	HubEnvVarName string
-	// HubConfigYAML is the snippet to paste into the hub's config.yaml -
-	// same shape Plan produces for a brand-new spoke.
-	HubConfigYAML string
 }
 
-// PlanEnrollment validates req against the hub's current config and
-// produces an EnrollmentPlan - see ARCHITECTURE.md "Spoke enrollment" for
-// the full workflow this is one step of. Unlike Plan, which reuses an
-// existing spoke's token when adding another certificate, PlanEnrollment
-// requires req.SpokeID to not already exist: enrolling an already-known
-// spoke isn't this function's job — add a certificate to it with Plan, or
-// rotate its token with PlanRotation.
-func PlanEnrollment(hubCfg *config.HubConfig, req EnrollmentRequest) (*EnrollmentPlan, error) {
-	if err := validateCertRequest(hubCfg, req.SpokeID, req.CertName, req.Domains, req.DNSProvider, req.DomainDNSProviders); err != nil {
+// PlanEnrollment validates req and writes the new spoke, its token, and
+// its one certificate directly into store - see ARCHITECTURE.md "Spoke
+// enrollment" for the full workflow this is one step of. Unlike Plan,
+// which reuses an existing spoke's token when adding another
+// certificate, PlanEnrollment requires req.SpokeID to not already exist:
+// enrolling an already-known spoke isn't this function's job - add a
+// certificate to it with Plan, or rotate its token with PlanRotation.
+func PlanEnrollment(store *hubstore.Store, req EnrollmentRequest) (*EnrollmentPlan, error) {
+	if err := validateCertRequest(store, req.SpokeID, req.CertName, req.Domains, req.DNSProvider, req.DomainDNSProviders); err != nil {
 		return nil, err
 	}
 	if req.HubURL == "" {
 		return nil, fmt.Errorf("hub url is required")
 	}
-	if _, exists := hubCfg.Spokes[req.SpokeID]; exists {
-		return nil, fmt.Errorf("spoke %q already exists in the hub's config — PlanEnrollment is for brand-new spokes only; use Plan to add a certificate to an existing spoke, or PlanRotation to rotate its token", req.SpokeID)
+	if exists, err := store.SpokeExists(req.SpokeID); err != nil {
+		return nil, fmt.Errorf("check spoke %q exists: %w", req.SpokeID, err)
+	} else if exists {
+		return nil, fmt.Errorf("spoke %q already exists — PlanEnrollment is for brand-new spokes only; use Plan to add a certificate to an existing spoke, or PlanRotation to rotate its token", req.SpokeID)
 	}
 
 	bearerToken, err := GenerateToken()
@@ -314,20 +291,22 @@ func PlanEnrollment(hubCfg *config.HubConfig, req EnrollmentRequest) (*Enrollmen
 		return nil, err
 	}
 
-	envVar := envVarName(req.SpokeID)
-	snippetReq := Request{
-		SpokeID:            req.SpokeID,
-		CertName:           req.CertName,
+	if err := store.CreateSpoke(req.SpokeID, bearerToken); err != nil {
+		return nil, fmt.Errorf("create spoke %q: %w", req.SpokeID, err)
+	}
+	newCert := config.SpokeCertConfig{
+		Name:               req.CertName,
 		Domains:            req.Domains,
 		DNSProvider:        req.DNSProvider,
 		DomainDNSProviders: req.DomainDNSProviders,
+	}
+	if err := store.UpsertSpokeCert(req.SpokeID, newCert); err != nil {
+		return nil, fmt.Errorf("add cert %q to spoke %q: %w", req.CertName, req.SpokeID, err)
 	}
 
 	return &EnrollmentPlan{
 		BearerToken:      bearerToken,
 		EnrollmentSecret: secret,
-		HubEnvVarName:    envVar,
-		HubConfigYAML:    buildHubConfigYAML(snippetReq, envVar, true),
 	}, nil
 }
 
@@ -337,64 +316,40 @@ type RotationRequest struct {
 	SpokeID string
 }
 
-// RotationResult is what PlanRotation generates: a freshly minted token
-// to add *alongside* the spoke's existing one(s), plus the operator
-// instructions for using it — see PlanRotation's doc comment for the full
-// workflow this is one step of.
+// RotationResult is what PlanRotation generates: a freshly minted token,
+// already written into store *alongside* the spoke's existing one(s) -
+// see PlanRotation's doc comment for the full workflow this is one step
+// of.
 type RotationResult struct {
-	NewToken      string
-	HubEnvVarName string // ${VAR} name for NewToken
-	HubConfigYAML string // instructions + snippet to add under spokes.<id>.tokens
+	NewToken string
 }
 
-// PlanRotation generates a new token for an already-configured spoke,
-// without touching or even displaying its existing token(s) — see this
-// package's doc comment on the general principle (never let hub/spoke
-// config drift from hand-editing), applied here to rotation specifically.
+// PlanRotation generates a new token for an already-configured spoke and
+// writes it into store alongside its existing token(s) - both are valid
+// simultaneously until the old one is explicitly removed (step 3 below).
 //
-// It deliberately does NOT attempt to reprint the spoke's full tokens:
-// list including its current entries: by the time hubCfg is loaded,
-// ${VAR} references have already been expanded to literal secret values
-// (see config.expandEnv) — there's no way to recover what ${VAR} name an
-// existing token was originally written as, and printing the literal
-// secret value itself into a snippet meant for pasting/logging would be
-// a real way to leak it. Instead this only describes what to *add*.
-//
-// The full rotation workflow this is one step of: (1) call PlanRotation,
-// add the printed line to the hub's config.yaml and the matching env var
-// to its env file, restart the hub - both tokens are now valid; (2) update
-// the spoke's own hub_token to the new value, restart the spoke, confirm
-// it's working; (3) remove the old token line from the hub's config.yaml
-// and its env file, restart the hub again to complete the rotation.
-func PlanRotation(hubCfg *config.HubConfig, req RotationRequest) (*RotationResult, error) {
+// The full rotation workflow this is one step of: (1) call PlanRotation -
+// both the old and new token are now valid; (2) update the spoke's own
+// hub_token to the new value, restart the spoke, confirm it's working;
+// (3) remove the old token (hubstore.Store.RemoveSpokeToken, or the web
+// admin UI) to complete the rotation.
+func PlanRotation(store *hubstore.Store, req RotationRequest) (*RotationResult, error) {
 	if req.SpokeID == "" {
 		return nil, fmt.Errorf("spoke id is required")
 	}
-	if _, ok := hubCfg.Spokes[req.SpokeID]; !ok {
-		return nil, fmt.Errorf("spoke %q is not defined in the hub's config", req.SpokeID)
+	if exists, err := store.SpokeExists(req.SpokeID); err != nil {
+		return nil, fmt.Errorf("check spoke %q exists: %w", req.SpokeID, err)
+	} else if !exists {
+		return nil, fmt.Errorf("spoke %q does not exist", req.SpokeID)
 	}
 
 	newToken, err := GenerateToken()
 	if err != nil {
 		return nil, err
 	}
-
-	suffix, err := randomHex(4)
-	if err != nil {
-		return nil, fmt.Errorf("generate env var suffix: %w", err)
+	if err := store.AddSpokeToken(req.SpokeID, newToken); err != nil {
+		return nil, fmt.Errorf("add rotated token to spoke %q: %w", req.SpokeID, err)
 	}
-	// A plain envVarName(req.SpokeID) would collide with the existing
-	// token's env var name - these need to coexist as two distinct
-	// ${VAR} references while both are valid during the grace period.
-	envVar := envVarName(req.SpokeID) + "_" + strings.ToUpper(suffix)
 
-	return &RotationResult{
-		NewToken:      newToken,
-		HubEnvVarName: envVar,
-		HubConfigYAML: fmt.Sprintf(
-			"  # Add this new token under spokes.%s.tokens - keep the existing\n"+
-				"  # entry there too until the spoke has confirmed using the new one:\n"+
-				"  #   - \"${%s}\"\n",
-			req.SpokeID, envVar),
-	}, nil
+	return &RotationResult{NewToken: newToken}, nil
 }

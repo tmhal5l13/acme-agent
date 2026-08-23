@@ -128,7 +128,7 @@ just set: a server that can't negotiate above TLS 1.2 fails the handshake.
 | `internal/hubstore` | hub | SQLite: what spokes have last reported (`spoke_cert_state`) — observed state only; desired state (domains, DNS provider, policy) lives in the hub's config, not the DB. Tracks a `schema_meta.version` and migrates an existing database forward on `Open` — see "Renewal health tracking" below |
 | `internal/dnsprovider` | hub | Builds a real `lego` DNS-01 `challenge.Provider` (Route53, Cloudflare, GoDaddy, PowerDNS) from config. The one package that ever touches DNS provider credentials |
 | `internal/selfsigned` | hub | Generates the hub's self-signed TLS certificate on first startup — see "TLS" above |
-| `internal/onboard` | `cmd/acme-onboard` | Validates a new spoke/certificate against the hub's current config and generates the matching hub-config snippet + spoke config.yaml — see "Onboarding a spoke" below |
+| `internal/onboard` | `cmd/acme-onboard`, `cmd/acme-hub --generate-token` | Validates a new spoke/certificate, writes it directly into the hub's database (`internal/hubstore`), and generates the spoke's own config.yaml — see "Onboarding a spoke" below |
 | `internal/hubclient` | spoke | The spoke's HTTP client for the hub's API, plus `DNS01Provider` — a `challenge.Provider` that relays `Present`/`CleanUp` through the hub instead of calling a real DNS API |
 | `internal/spokeagent` | spoke | The polling loop: ask the hub if due, apply local retry backoff, run the issue/install pipeline, report back |
 | `internal/acmeclient` | spoke | Drives `lego`: ACME account registration/reuse, `Issue()` |
@@ -404,18 +404,27 @@ rejects an override referencing a domain not actually in that cert's
 `domains` (almost certainly a typo) or a provider not defined under
 `dns_providers`, the same two checks already applied to the cert-level
 `dns_provider` field. `internal/onboard`'s `Request.DomainDNSProviders`
-mirrors this for the generated hub config snippet.
+mirrors this same validation for a cert written directly into the
+database.
 
 ## Spoke enrollment
 
 A lower-friction alternative to fully manual onboarding (below): `acme-hub
 --generate-token` mints a one-time enrollment token for a brand-new spoke;
-`acme-spoke --load-token` is meant to be the entire spoke-side setup in
-one command, dialing the hub, verifying it cryptographically, and writing
-a working `config.yaml` itself. **Only the hub side exists so far** —
-`--load-token` is still to be built; until then, `--generate-token`'s
-output still needs to be paired with the fully-manual spoke config steps
-in "Onboarding a spoke" below.
+`acme-spoke --load-token` is the entire spoke-side setup in one command —
+dialing the hub, verifying it cryptographically, and writing a working
+`config.yaml` itself.
+
+> **Mid-migration note:** as of this section's most recent update,
+> `--generate-token` and `acme-onboard` (below) write the spoke/cert
+> straight into the hub's database (`internal/hubstore`), replacing the
+> hub-config-snippet-to-paste flow both used to require. The hub's own
+> *serving* path (`internal/hubapi`) still reads spoke desired state from
+> `config.HubConfig.Spokes` at this point, not the database — that cutover
+> is the very next change, landing together with this one in practice.
+> Once it does, this note (and the "Onboarding a spoke" section below)
+> gets a fuller rewrite to describe the end state; treat both as
+> in-progress until then.
 
 ### `acme-hub --generate-token`
 
@@ -425,15 +434,13 @@ acme-hub --config /etc/acme-hub/config.yaml --generate-token \
   --domains radius.example.com --dns-provider route53_main
 ```
 
-Validates the request against the hub's current config (same checks
-`acme-onboard` already applies — the DNS provider must exist, the spoke
-must not already exist; this is new-spoke enrollment only, not adding a
-certificate to one that's already configured) and prints three things:
-the hub-config YAML snippet to paste under `spokes:` (identical shape
-`acme-onboard` produces for a brand-new spoke), the line to add to the
-hub's env file (the actual bearer token value — never written into
-`config.yaml` itself, same as everywhere else in this project), and one
-opaque token string for the new spoke.
+Validates the request (same checks `acme-onboard` already applies — the
+DNS provider must exist, the spoke must not already exist; this is
+new-spoke enrollment only, not adding a certificate to one that's already
+configured), writes the new spoke, its bearer token, and its one
+certificate directly into the hub's database, and prints the one opaque
+enrollment token string for the new spoke to use with
+`acme-spoke --load-token`.
 
 `--hub-url` defaults to `https://<tls_host or listen_addr host>:<listen_addr port>`
 if not given explicitly. `--domain-dns-providers` accepts the same
@@ -442,12 +449,6 @@ feature above, for a cert whose domains span more than one backend even
 at enrollment time. `--token-ttl` (default `1h`) bounds how long the
 printed token stays redeemable — generating one and never using it just
 means it silently expires, nothing to clean up by hand.
-
-Does **not** edit `config.yaml` itself — same reasoning `acme-onboard` has
-always used: programmatically mutating a hand-authored, commented YAML
-file risks mangling it in a way a human editing it wouldn't. The operator
-pastes the snippet, then reloads the hub with `SIGHUP` (see "Config
-hot-reload" above) — no restart needed.
 
 ### `POST /v1/enroll`
 
@@ -472,26 +473,19 @@ follows the exact WHERE-guarded pattern `Claim` established for the
 renewal lease, proven under real concurrent goroutines the same way. One
 sequencing detail matters for correctness: the handler checks whether the
 secret's associated spoke is actually present in the hub's *current*
-config *before* consuming the secret. If the operator generated a token
-but hasn't yet pasted the hub-config snippet and reloaded, the endpoint
-returns `503` without redeeming anything — the same secret works once
-they finish, rather than being permanently burned by an early, doomed-to-fail
+config *before* consuming the secret. If the hub hasn't yet reloaded to
+pick up the newly created spoke, the endpoint returns `503` without
+redeeming anything — the same secret works once it has, rather than
+being permanently burned by an early, doomed-to-fail
 attempt.
 
 ## Onboarding a spoke
 
-`cmd/acme-onboard` exists because hand-editing two separate YAML files (the
-hub's `spokes.<id>.certs[].name` and the spoke's own `certs[].name`) to keep
-a matching name and a matching token was the actual friction point in
-adding a new spoke — a typo in either file produces a silent `403` the
-first time the real spoke tries to use it, not a helpful error at edit
-time.
-
-The tool never edits the hub's config itself (YAML round-tripping through
-`gopkg.in/yaml.v3` would strip comments and reformat the file, so this is
-deliberate, not a missing feature) — it loads the hub's *current* config
-read-only, validates the request against it, and prints exactly what to
-paste:
+`cmd/acme-onboard` is a scriptable, non-interactive alternative to the
+hub's web admin UI (see "Web admin UI" below) — the same same-host,
+direct-database-access operational model `acme-hub --generate-token`
+uses, for adding a spoke or a certificate from a script instead of a
+browser.
 
 ```
 go build -o /usr/local/bin/acme-onboard ./cmd/acme-onboard
@@ -510,23 +504,28 @@ acme-onboard \
   --spoke-config-out ./radius-spoke-config.yaml
 ```
 
-This prints the `spokes:` block to paste into the hub's `config.yaml`, the
-`${VAR}=...` line to add to `acme-hub.env`, and writes the new spoke's
-complete `config.yaml` to the given path — all sharing one freshly
-generated 256-bit token (`crypto/rand`), so the two files can't drift. It
-also reminds you to copy the hub's certificate to `--hub-tls-cert-file` on
-the new spoke and verify its fingerprint (see "TLS" above) — that step
-still has to happen out-of-band, since the tool has no access to the
-spoke's filesystem. Running it again with an existing `--spoke-id` and a
-new `--cert-name` adds a second certificate to that spoke and reuses its
-existing token instead of generating (and thereby invalidating) a new one.
+`--hub-config` is read-only, used only to locate the hub's database
+(`db_path`) — nothing under `spokes:`/`dns_providers:` on that file is
+consulted or written. The spoke, its bearer token, and its certificate
+assignment are written directly into the database (validated the same
+way: the DNS provider must exist, cert names/domains must be well-formed
+and path-safe), and the new spoke's complete `config.yaml` is written to
+`--spoke-config-out` — one freshly generated 256-bit token
+(`crypto/rand`) shared by both, so the two can't drift. It also reminds
+you to copy the hub's certificate to `--hub-tls-cert-file` on the new
+spoke and verify its fingerprint (see "TLS" above) — that step still has
+to happen out-of-band, since the tool has no access to the spoke's
+filesystem. Running it again with an existing `--spoke-id` and a new
+`--cert-name` adds a second certificate to that spoke and reuses its
+existing token instead of generating (and thereby invalidating) a new
+one.
 
 Validated in `internal/onboard`'s tests by writing the generated spoke
 config to a file and loading it through the real `config.LoadSpokeConfig`
 — not just checking the YAML looks right — and, during development, by
-running the actual built binary against a hub config that started with
-zero spokes, applying its exact printed output, and completing a real
-issuance against Let's Encrypt staging with it.
+running the actual built binary against a real database that started with
+zero spokes, copying its generated config.yaml to a real spoke host, and
+completing a real issuance against Let's Encrypt staging with it.
 
 ## Admin notifications
 
@@ -987,30 +986,24 @@ during a grace period (`internal/hubapi`'s `authorize` does one map lookup
 regardless of how many tokens map to a spoke — no code cared how many
 entries the list holds). Under normal operation it holds exactly one.
 
-The workflow, using `cmd/acme-onboard`'s `PlanRotation` (`internal/onboard`):
+The workflow, using `internal/onboard`'s `PlanRotation` (`cmd/acme-onboard`
+or the hub's web admin UI):
 
-1. Run the rotation plan for the spoke. It generates a fresh, cryptographically
-   random token and prints a snippet to add *alongside* the spoke's existing
-   token(s) under `spokes.<id>.tokens` in the hub's config, plus the matching
-   env var to add to the hub's env file. It deliberately never reprints or
-   reconstructs the spoke's *existing* token — by the time the hub's config is
-   loaded, `${VAR}` references have already been expanded to literal secret
-   values (see `config.expandEnv`), so there's no way to recover what env var
-   name an existing token was originally written under, and printing the
-   literal secret into an add-only snippet meant for pasting/logging would be
-   a real way to leak it.
-2. Add that line and env var, restart the hub — both tokens are now valid.
-3. Update the spoke's own `hub_token` to the new value, restart the spoke,
-   confirm it's actually working (a successful `/due` poll is enough).
-4. Remove the old token line from the hub's config and its env file, restart
-   the hub again to complete the rotation — only the new token authenticates
-   from this point on.
-
-The new token's env var name can't just be `envVarName(spokeID)` (what a
-fresh onboard would generate) — that would collide with the existing token's
-own env var name while both need to coexist as distinct `${VAR}` references
-during the grace period. `PlanRotation` appends a short random hex suffix to
-keep the two apart.
+1. Run the rotation plan for the spoke. It generates a fresh,
+   cryptographically random token and writes it directly into the hub's
+   database *alongside* the spoke's existing token(s) — it deliberately
+   never touches or even displays the spoke's *existing* token, only ever
+   adds the new one.
+2. Reload the hub (`SIGHUP` — no restart needed) — both tokens are now
+   valid.
+3. Update the spoke's own `hub_token` to the new value, restart the
+   spoke, confirm it's actually working (a successful `/due` poll is
+   enough).
+4. Remove the spoke's old token (`hubstore.Store.RemoveSpokeToken` —
+   refused if it would leave the spoke with zero tokens; not yet exposed
+   via any CLI, only reachable directly against the store today) and
+   reload again to complete the rotation — only the new token
+   authenticates from this point on.
 
 ## Hub TLS certificate rotation
 
@@ -1088,9 +1081,8 @@ The manual rotation procedure:
   **`internal/spokeagent`** (backoff math, cert-time parsing, the local
   backoff-skip decision via a fake hub over `httptest`), **`internal/onboard`**
   (including a round-trip through the real config loader, and
-  `PlanRotation` — a fresh token distinct from the spoke's existing one,
-  a collision-free env var name, and that its output never leaks the
-  spoke's existing token value), **`internal/hubclient`**
+  `PlanRotation` — a fresh token added to the store, distinct from and
+  without disturbing the spoke's existing one(s)), **`internal/hubclient`**
   (real TLS handshakes against a real listener using a real
   `internal/selfsigned` certificate — including that a client pinned to
   the *wrong* certificate is actually rejected, that a server unable to
