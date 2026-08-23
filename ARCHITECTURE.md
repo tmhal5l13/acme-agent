@@ -1147,25 +1147,26 @@ The manual rotation procedure:
   this would need to be CRL-based — fetching the CRL named in the
   certificate's own `crlDistributionPoints` extension and checking the
   certificate's serial against it.
-- **Only one AWS identity per hub for Route53** — deliberate, not an
-  oversight. `internal/dnsprovider.New`'s `"route53"` case passes no
-  credentials of its own; `route53.NewDNSProviderConfig` resolves them via
-  the AWS SDK's own default chain (environment, `~/.aws/credentials`, or
-  an IAM role), which is exactly what the config's own comment on
-  `HostedZoneID`/`Region` documents — no `access_key_id`/`secret_access_key`
-  fields exist on purpose, per AWS's own guidance against long-lived keys
-  in application config. The consequence, a logical entailment of that
-  choice rather than something separately decided: since credential
-  resolution happens once per process, every `route53_*` entry in the
-  hub's config resolves to the same AWS identity, however many are
-  defined. This only matters for Route53 zones split across AWS accounts
-  that can't be unified under one IAM principal — one account with
-  multiple zones, scoped via one policy across several hosted-zone ARNs,
-  is unaffected. Every other provider (Cloudflare, GoDaddy, PowerDNS,
-  rfc2136) takes its credentials directly from its own named config
-  entry, independent of the process environment, so multiple distinct
-  credential sets for those providers already work today without any
-  code change.
+- **Route53 credentials, and per-entry override.** By default,
+  `internal/dnsprovider.New`'s `"route53"` case passes no credentials of its
+  own; `route53.NewDNSProviderConfig` resolves them via the AWS SDK's own
+  default chain (environment, `~/.aws/credentials`, or an IAM role) — the
+  recommended default and the only option needed for a single-AWS-account
+  deployment, per AWS's own guidance against long-lived keys in application
+  config. Since that resolution happens once per process, it's shared by
+  every `route53_*` entry that doesn't override it. For Route53 zones split
+  across AWS accounts that can't be unified under one IAM principal (one
+  account with multiple zones, scoped via one policy across several
+  hosted-zone ARNs, doesn't need this), each `route53_*` entry may set its
+  own `access_key_id`/`secret_access_key` (must be set together, or not at
+  all) and optional `session_token` (temporary/STS credentials only, requires
+  the other two) — see `deploy/hub-config.example.yaml`. `internal/dnsprovider`
+  doesn't duplicate lego's own validation of these; `route53.NewDNSProviderConfig`
+  already rejects an incomplete combination. Every other provider
+  (Cloudflare, GoDaddy, PowerDNS, rfc2136) already takes its credentials
+  directly from its own named config entry, independent of the process
+  environment, so multiple distinct credential sets for those providers
+  work without any of this.
 - **CA flexibility (`directory_url`, `ca_cert_file`, EAB — see "ACME CA
   flexibility" above) is implemented but has never been exercised against
   a real non-Let's-Encrypt CA.** Every live test in this project's history

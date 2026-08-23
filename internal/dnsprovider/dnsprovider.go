@@ -34,6 +34,17 @@ func New(cfg config.DNSProviderConfig) (challenge.Provider, error) {
 		r53Cfg := route53.NewDefaultConfig()
 		r53Cfg.HostedZoneID = cfg.HostedZoneID // optional; lego looks up the zone by domain if empty
 		r53Cfg.Region = cfg.Region             // optional; falls back to the AWS SDK's own resolution if empty
+		// AccessKeyID/SecretAccessKey/SessionToken are optional explicit
+		// overrides - see config.DNSProviderConfig's doc comment. Left
+		// empty (the common case), lego falls through to the AWS SDK's
+		// own default credential chain, unchanged from before these
+		// fields existed. lego's own NewDNSProviderConfig validates
+		// AccessKeyID/SecretAccessKey are supplied together (or not at
+		// all) and that SessionToken isn't supplied alone - no need to
+		// duplicate that check here.
+		r53Cfg.AccessKeyID = cfg.AccessKeyID
+		r53Cfg.SecretAccessKey = cfg.SecretAccessKey
+		r53Cfg.SessionToken = cfg.SessionToken
 		return route53.NewDNSProviderConfig(r53Cfg)
 
 	case "godaddy":

@@ -74,7 +74,22 @@ dns_providers:
     region: "" # optional; leave blank to use the AWS SDK's own resolution
     # No access_key_id/secret_access_key fields on purpose: credentials come
     # from the standard AWS SDK credential chain (env vars, ~/.aws/credentials,
-    # or an IAM role), not from this file.
+    # or an IAM role), not from this file. This is the recommended default,
+    # and the only option needed for a single-AWS-account deployment.
+
+  # access_key_id/secret_access_key/session_token are an explicit override for
+  # when the SDK chain can't cover the use case: more than one route53_*
+  # entry needing genuinely different AWS credentials (e.g. two separate AWS
+  # accounts' hosted zones managed from one hub) - the SDK chain resolves one
+  # set of ambient credentials for the whole process, shared by every entry
+  # that doesn't override it. access_key_id/secret_access_key must be set
+  # together, or not at all; session_token is optional and only meaningful
+  # for temporary/STS-issued credentials.
+  # route53_other_account:
+  #   type: route53
+  #   access_key_id: "${ROUTE53_OTHER_ACCOUNT_ACCESS_KEY_ID}"
+  #   secret_access_key: "${ROUTE53_OTHER_ACCOUNT_SECRET_ACCESS_KEY}"
+  #   session_token: "${ROUTE53_OTHER_ACCOUNT_SESSION_TOKEN}" # optional
 
   cloudflare_main:
     type: cloudflare
