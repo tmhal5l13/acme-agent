@@ -45,6 +45,17 @@ const (
 	challSrvDNSAddr       = "localhost:8053"
 )
 
+// pebbleEABKeyID/pebbleEABHMACKey are one of the three fixed test keys
+// pebble itself ships in its own
+// test/config/pebble-config-external-account-bindings.json
+// (github.com/letsencrypt/pebble/v2) - copied from pebble's source, not
+// invented here, so startPebbleWithEAB proves acme-agent's EAB registration
+// path against pebble's own real EAB enforcement.
+const (
+	pebbleEABKeyID   = "kid-1"
+	pebbleEABHMACKey = "zWNDZM6eQGHWpSRTPal5eIUYFTu7EajVIoguysqZ9wG44nMEtx3MUAsUDkMTQ12W"
+)
+
 // startPebble launches a real pebble subprocess configured to validate
 // DNS-01 challenges against pebble-challtestsrv's mock DNS server, waits
 // for its ACME directory to answer, and registers a cleanup to kill it.
@@ -52,12 +63,33 @@ const (
 // pebble's TLS listener (see internal/acmeclient/testdata/pebble).
 func startPebble(t *testing.T) (caCertFile string) {
 	t.Helper()
+	return startPebbleConfig(t, false)
+}
+
+// startPebbleWithEAB is startPebble, but with pebble's
+// externalAccountBindingRequired set so a newAccount request must present a
+// valid EAB (kid + HMAC key) to succeed - see pebbleEABKeyID/
+// pebbleEABHMACKey.
+func startPebbleWithEAB(t *testing.T) (caCertFile string) {
+	t.Helper()
+	return startPebbleConfig(t, true)
+}
+
+func startPebbleConfig(t *testing.T, requireEAB bool) (caCertFile string) {
+	t.Helper()
 
 	testdataDir, err := filepath.Abs(filepath.Join("testdata", "pebble"))
 	if err != nil {
 		t.Fatalf("resolve testdata path: %v", err)
 	}
 	caCertFile = filepath.Join(testdataDir, "pebble.minica.pem")
+
+	eabJSON := ""
+	if requireEAB {
+		eabJSON = fmt.Sprintf(`,
+    "externalAccountBindingRequired": true,
+    "externalAccountMACKeys": {%q: %q}`, pebbleEABKeyID, pebbleEABHMACKey)
+	}
 
 	configPath := filepath.Join(t.TempDir(), "pebble-config.json")
 	configJSON := fmt.Sprintf(`{
@@ -70,9 +102,9 @@ func startPebble(t *testing.T) (caCertFile string) {
     "tlsPort": 5001,
     "profiles": {
       "default": {"description": "default", "validityPeriod": 7776000}
-    }
+    }%s
   }
-}`, filepath.Join(testdataDir, "cert.pem"), filepath.Join(testdataDir, "key.pem"))
+}`, filepath.Join(testdataDir, "cert.pem"), filepath.Join(testdataDir, "key.pem"), eabJSON)
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
 		t.Fatalf("write pebble config: %v", err)
 	}
