@@ -52,10 +52,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	observed, err := s.store.All()
+	entries, err := s.adminEntries(state)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// adminEntries merges observed state (s.store.All()) with desired state
+// (state.cfg.Spokes[*].Certs) into one deterministically-sorted slice - a
+// configured-but-never-checked-in cert still appears as "unknown" rather
+// than being silently missing. Shared by handleStatus (JSON) and
+// handleAdminDashboard (HTML) so the two views can never structurally
+// diverge on what counts.
+func (s *Server) adminEntries(state *hubState) ([]statusEntry, error) {
+	observed, err := s.store.All()
+	if err != nil {
+		return nil, err
 	}
 	byKey := make(map[string]hubstore.CertState, len(observed))
 	for _, cs := range observed {
@@ -85,7 +100,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Deterministic order - map iteration above isn't, and a dashboard
-	// diffing two responses over time (or a human reading raw JSON)
+	// diffing two responses over time (or a human reading raw output)
 	// shouldn't see certificates reshuffle from one request to the next
 	// with nothing having actually changed.
 	sort.Slice(entries, func(i, j int) bool {
@@ -97,6 +112,5 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if entries == nil {
 		entries = []statusEntry{}
 	}
-
-	writeJSON(w, http.StatusOK, entries)
+	return entries, nil
 }

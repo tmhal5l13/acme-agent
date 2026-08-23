@@ -1,6 +1,7 @@
 package hubapi
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -67,6 +68,26 @@ func bearerToken(r *http.Request) (string, bool) {
 	}
 	token := strings.TrimPrefix(h, prefix)
 	return token, token != ""
+}
+
+// authorizeAdmin checks HTTP Basic Auth's password field against
+// state.cfg.StatusToken (username ignored/arbitrary, matching
+// StatusToken's single-shared-secret model - see its doc comment).
+// Same constant-time comparison handleStatus uses, for the same reason:
+// exactly one valid value being compared directly, not a set being
+// looked up. Unlike handleStatus, a failed attempt sets WWW-Authenticate
+// so a browser shows its native login prompt - handleStatus deliberately
+// doesn't, since it's a JSON API for curl/monitoring tools, not a
+// browser tab.
+func authorizeAdmin(w http.ResponseWriter, r *http.Request, state *hubState) bool {
+	_, password, ok := r.BasicAuth()
+	if !ok || len(password) != len(state.cfg.StatusToken) ||
+		subtle.ConstantTimeCompare([]byte(password), []byte(state.cfg.StatusToken)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Basic realm="acme-hub admin"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // writeAuthError maps authorize's sentinel errors to the right HTTP status.

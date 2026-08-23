@@ -121,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	// startup-only setting.
 	if s.state.Load().cfg.StatusToken != "" {
 		mux.HandleFunc("GET /v1/status", s.handleStatus)
+		mux.HandleFunc("GET /admin", s.handleAdminDashboard)
 	}
 	return mux
 }
