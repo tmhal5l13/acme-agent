@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -159,7 +160,19 @@ func TestWatchForReload_PicksUpSIGHUP(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watchForReload(ctx, configPath, server)
+
+	// Registered synchronously, here, before watchForReload runs as a
+	// goroutine - see run's comment in main.go on why this ordering
+	// matters: SIGHUP's default disposition terminates the process, and
+	// registering inside the goroutine would leave a real window where a
+	// SIGHUP arriving before signal.Notify actually runs kills the test
+	// binary outright instead of being caught (this is exactly what broke
+	// under load before this fix - "signal: hangup" killing the whole
+	// package's test run, not just this subtest).
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	defer signal.Stop(sighup)
+	go watchForReload(ctx, sighup, configPath, server)
 
 	// spoke-b doesn't exist in hubConfigV1 yet.
 	req := httptest.NewRequest("GET", "/v1/certs/cert-b/due", nil)

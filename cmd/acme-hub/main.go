@@ -103,7 +103,18 @@ func run() error {
 	// latency well under the staleness threshold itself.
 	go server.RunWatchdog(ctx, watchdogScanInterval)
 
-	go watchForReload(ctx, *configPath, server)
+	// signal.Notify is called synchronously, here, before watchForReload
+	// ever runs as a goroutine - not inside it. SIGHUP's default
+	// disposition (unlike SIGTERM/SIGINT) is to terminate the process
+	// outright; registering it inside the goroutine would leave a real
+	// window between "go watchForReload(...) is scheduled" and "its
+	// signal.Notify call actually executes" during which an early SIGHUP
+	// would kill acme-hub instead of triggering a reload. Registering it
+	// here first closes that window completely.
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	defer signal.Stop(sighup)
+	go watchForReload(ctx, sighup, *configPath, server)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -129,23 +140,25 @@ func run() error {
 }
 
 // watchForReload re-reads configPath and applies it to server on every
-// SIGHUP, until ctx is cancelled. This is a separate signal.Notify loop
-// rather than reusing run's signal.NotifyContext for interrupt/SIGTERM:
-// NotifyContext cancels a context once and is done, which is exactly
-// wrong for a signal meant to be handled repeatedly for the life of the
-// process (the standard reload-on-SIGHUP pattern many daemons use, e.g.
-// nginx). A failed reload (bad YAML, a cert referencing an unknown
-// dns_provider, ...) is logged and otherwise ignored - see
-// hubapi.Server.Reload's doc comment for why it never partially applies
-// a bad config, only cleanly rejects it. Only config.HubConfig fields
-// hubapi.Server actually reads (spokes, dns_providers) take effect this
-// way; listen_addr, TLS cert paths, data_dir, and db_path still need a
-// real restart - see ARCHITECTURE.md "Config hot-reload".
-func watchForReload(ctx context.Context, configPath string, server *hubapi.Server) {
-	sighup := make(chan os.Signal, 1)
-	signal.Notify(sighup, syscall.SIGHUP)
-	defer signal.Stop(sighup)
-
+// SIGHUP received on sighup, until ctx is cancelled. sighup must already be
+// registered via signal.Notify by the caller, synchronously, before this
+// runs as a goroutine - see run's comment on why registering it here
+// instead would leave a real window where an early SIGHUP kills the
+// process via its default disposition instead of triggering a reload.
+//
+// This is a separate signal-handling loop rather than reusing run's
+// signal.NotifyContext for interrupt/SIGTERM: NotifyContext cancels a
+// context once and is done, which is exactly wrong for a signal meant to
+// be handled repeatedly for the life of the process (the standard
+// reload-on-SIGHUP pattern many daemons use, e.g. nginx). A failed reload
+// (bad YAML, a cert referencing an unknown dns_provider, ...) is logged
+// and otherwise ignored - see hubapi.Server.Reload's doc comment for why
+// it never partially applies a bad config, only cleanly rejects it. Only
+// config.HubConfig fields hubapi.Server actually reads (spokes,
+// dns_providers) take effect this way; listen_addr, TLS cert paths,
+// data_dir, and db_path still need a real restart - see ARCHITECTURE.md
+// "Config hot-reload".
+func watchForReload(ctx context.Context, sighup <-chan os.Signal, configPath string, server *hubapi.Server) {
 	for {
 		select {
 		case <-ctx.Done():
