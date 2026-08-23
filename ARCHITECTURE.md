@@ -227,10 +227,13 @@ unprivileged user session doesn't have — a limitation of rootless testing,
 not a sign of incompatibility), but apply correctly under the real
 root-managed system units these files describe.
 
-Secrets for both binaries live in an `EnvironmentFile` (`acme-hub.env` /
-`acme-spoke.env`, mode `0600`, root-owned) referenced from `config.yaml`
-via `${VAR}` — never written into `config.yaml` itself, which is why that
-file can safely stay world-readable (`0644`).
+Secrets for both binaries live in a separate env file (`acme-hub.env` /
+`acme-spoke.env`) referenced from `config.yaml` via `${VAR}` — never
+written into `config.yaml` itself, which is why that file can safely stay
+world-readable (`0644`). `acme-spoke.env` stays `0600` root-owned,
+populated the standard way via `EnvironmentFile=`; `acme-hub.env` is
+`0640`, group `acme-hub-secrets` — see "Config hot-reload" below for why
+the hub's case needs more than that.
 
 ## Config hot-reload
 
@@ -264,7 +267,48 @@ applied.
 This is what makes low-friction spoke enrollment (see "Onboarding a
 spoke") actually low-friction on the hub side too: adding a spoke no
 longer means restarting the hub, just pasting the generated snippet and
-sending one signal.
+sending one signal. `deploy/acme-hub.service` sets `ExecReload=/bin/kill
+-HUP $MAINPID` specifically so `systemctl reload acme-hub` works — a
+plain `Type=simple` unit has no reload behavior at all without one.
+
+**Why this needed more than just re-reading `config.yaml`.** A newly
+enrolled spoke's bearer token — or a newly added DNS provider's
+credential — always references a brand-new `${VAR}`, since it's freshly
+generated. Environment variables are fixed in a process's environment at
+the moment it's exec'd; nothing a running process does afterward,
+including re-parsing its own config, can see a variable that didn't exist
+when it started. So `LoadHubConfig` doesn't resolve `${VAR}` from the
+process's environment at all — it reads `acme-hub.env` (next to
+`config.yaml`, by convention) directly, fresh, on every call, falling
+back to the process's own environment only for a name not found in the
+file, or if the file can't be read at all (see below). This is why one
+function handles both startup and every later reload identically, with no
+separate "reload mode."
+
+Reading that file directly needs real read access to it, which is where
+`DynamicUser=yes` complicates things: the hub's UID is freshly allocated
+by systemd every start, with no standing grants to anything. A root-owned
+`0600` file — which is all `EnvironmentFile=` alone ever required, since
+*systemd itself* reads it as root before dropping to the dynamic UID —
+isn't readable by the hub process on its own. `acme-hub.service` grants
+it access via `SupplementaryGroups=acme-hub-secrets`: a *stable* group
+(unlike the UID, which isn't stable across restarts) that
+`install-hub.sh` creates and sets as `acme-hub.env`'s group, `0640`. If
+that grant is ever missing or misconfigured, `LoadHubConfig` doesn't fail
+outright — a permission error falls back to the process's own
+environment the same way a missing file does, degrading to exactly the
+pre-fix behavior (reload works, just can't see anything added to the file
+since startup) rather than breaking the hub.
+
+`DynamicUser`'s interaction with `SupplementaryGroups` specifically can't
+be verified the rootless `systemd-run --user` way the rest of this unit's
+hardening was (see below — `DynamicUser` requires the real system
+manager, not a user session), so it was checked directly instead: a real
+`0640 root:acme-hub-secrets` file, a real `systemd-run
+--property=DynamicUser=yes` transient unit denied access without
+`SupplementaryGroups=acme-hub-secrets` set (`Permission denied`) and
+granted access with it set (reads the file successfully) — both cases
+confirmed empirically, not just reasoned through.
 
 ## Cross-platform builds
 

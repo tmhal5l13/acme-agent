@@ -23,14 +23,34 @@ fi
 # (which systemd's StateDirectory= in the unit handles automatically).
 install -d -m 0755 "$CONFIG_DIR"
 
+# A stable group (unlike DynamicUser's freshly-allocated, per-start UID)
+# that acme-hub.service grants the hub read access to via
+# SupplementaryGroups= - see that file's comment on why the hub needs to
+# read acme-hub.env directly, not just via systemd's own EnvironmentFile=
+# population at startup. -f: fine if it already exists (re-running this
+# script is safe).
+groupadd -f acme-hub-secrets
+
+# Created here with the right owner/group/mode from the start, so the
+# operator only ever has to edit its contents (step 2 below), never
+# remember to fix its permissions - group-readable, not group-writable or
+# world-anything. Left untouched if it already exists (e.g. re-running
+# this script on an already-configured host).
+if [ ! -e "$CONFIG_DIR/acme-hub.env" ]; then
+	install -m 0640 -o root -g acme-hub-secrets /dev/null "$CONFIG_DIR/acme-hub.env"
+fi
+
 install -m 0644 "$SCRIPT_DIR/acme-hub.service" /etc/systemd/system/acme-hub.service
 systemctl daemon-reload
 
 echo "Installed acme-hub.service. Next steps:"
 echo "  1. Copy deploy/hub-config.example.yaml to $CONFIG_DIR/config.yaml and edit it (mode 0644 is fine - no secrets in it)"
-echo "  2. Create $CONFIG_DIR/acme-hub.env (mode 0600, root-owned) with DNS provider credentials and spoke tokens, e.g.:"
+echo "  2. Edit $CONFIG_DIR/acme-hub.env (already created, mode 0640, group acme-hub-secrets)"
+echo "     with DNS provider credentials and spoke tokens, e.g.:"
 echo "       CLOUDFLARE_API_TOKEN=..."
 echo "       SPOKE_FREERADIUS_TOKEN=..."
+echo "     Upgrading an existing install? Fix its permissions the same way:"
+echo "       chown root:acme-hub-secrets $CONFIG_DIR/acme-hub.env && chmod 0640 $CONFIG_DIR/acme-hub.env"
 echo "  3. systemctl enable --now acme-hub"
 echo "  4. journalctl -u acme-hub -f"
 echo "     - on first start, the hub self-signs its own TLS certificate and logs its"

@@ -9,6 +9,12 @@ ExecStart=/usr/local/bin/acme-hub --config /etc/acme-hub/config.yaml
 Restart=on-failure
 RestartSec=5s
 
+# Without this, "systemctl reload acme-hub" has nothing to do and fails
+# outright - a plain Type=simple unit has no reload behavior by default.
+# $MAINPID is systemd's own specifier for this unit's running process;
+# see "Config hot-reload" above for what a SIGHUP actually does.
+ExecReload=/bin/kill -HUP $MAINPID
+
 # Identity: a fresh, unique UID/GID allocated by systemd for this service
 # alone (never reused across restarts or other services), no shell, no
 # home directory to manage manually. The hub never execs anything (unlike
@@ -20,8 +26,26 @@ StateDirectory=acme-hub
 StateDirectoryMode=0750
 
 # Secrets referenced via ${VAR} in config.yaml (DNS provider credentials,
-# spoke bearer tokens) - populate this file on the host, keep it out of
-# source control, mode 0600.
+# spoke bearer tokens) live in acme-hub.env, kept out of source control.
+# acme-hub itself reads this file directly - not just via
+# EnvironmentFile= below - every time it (re)loads config.yaml, including
+# on every SIGHUP reload (see ARCHITECTURE.md "Config hot-reload"): a
+# process's own environment is fixed at exec time, so a variable added to
+# this file after startup (e.g. a newly-enrolled spoke's bearer token)
+# would never become visible through EnvironmentFile= alone without a
+# restart. That direct read needs real read access to the file, which
+# DynamicUser's freshly-allocated, otherwise-unprivileged UID doesn't
+# have on its own - hence acme-hub-secrets below: a stable group (unlike
+# the UID, which changes every start) that install-hub.sh creates and
+# grants read access to acme-hub.env (mode 0640, group acme-hub-secrets).
+SupplementaryGroups=acme-hub-secrets
+
+# Also kept as a fallback: if the SupplementaryGroups grant above is ever
+# missing or misconfigured, the hub still starts (systemd reads this file
+# as root, before dropping to DynamicUser, so this path doesn't depend on
+# the grant at all) - reload would just degrade to not seeing variables
+# added to the file since startup, the same limitation that existed
+# before the direct-read mechanism above, not a hard failure.
 EnvironmentFile=/etc/acme-hub/acme-hub.env
 
 # Hardening. NoNewPrivileges/ProtectSystem/ProtectHome/PrivateTmp/
