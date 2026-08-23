@@ -362,20 +362,59 @@ rejects an override referencing a domain not actually in that cert's
 `dns_provider` field. `internal/onboard`'s `Request.DomainDNSProviders`
 mirrors this for the generated hub config snippet.
 
-## Spoke enrollment (`POST /v1/enroll`)
+## Spoke enrollment
 
-`POST /v1/enroll` is the hub-side half of a lower-friction alternative to
-manual onboarding (below) that's still in progress — the CLI tooling that
-generates and redeems tokens against this endpoint (`acme-hub
---generate-token`, `acme-spoke --load-token`) is a separate, not-yet-built
-piece; this section documents what already exists.
+A lower-friction alternative to fully manual onboarding (below): `acme-hub
+--generate-token` mints a one-time enrollment token for a brand-new spoke;
+`acme-spoke --load-token` is meant to be the entire spoke-side setup in
+one command, dialing the hub, verifying it cryptographically, and writing
+a working `config.yaml` itself. **Only the hub side exists so far** —
+`--load-token` is still to be built; until then, `--generate-token`'s
+output still needs to be paired with the fully-manual spoke config steps
+in "Onboarding a spoke" below.
 
-The endpoint redeems a one-time enrollment secret and hands back a
-brand-new spoke's real bearer token plus the certs/domains it's authorized
-for — the one place in this API a request needs no bearer token at all,
-since a spoke that hasn't enrolled yet has nothing to present. Secrets are
-tracked in a new `enrollment_tokens` table (schema version 4): `secret`
-(cleartext, matching how bearer tokens in `config.yaml` are handled — see
+### `acme-hub --generate-token`
+
+```
+acme-hub --config /etc/acme-hub/config.yaml --generate-token \
+  --spoke-id radius-spoke --cert-name radius-cert \
+  --domains radius.example.com --dns-provider route53_main
+```
+
+Validates the request against the hub's current config (same checks
+`acme-onboard` already applies — the DNS provider must exist, the spoke
+must not already exist; this is new-spoke enrollment only, not adding a
+certificate to one that's already configured) and prints three things:
+the hub-config YAML snippet to paste under `spokes:` (identical shape
+`acme-onboard` produces for a brand-new spoke), the line to add to the
+hub's env file (the actual bearer token value — never written into
+`config.yaml` itself, same as everywhere else in this project), and one
+opaque token string for the new spoke.
+
+`--hub-url` defaults to `https://<tls_host or listen_addr host>:<listen_addr port>`
+if not given explicitly. `--domain-dns-providers` accepts the same
+`domain=provider,domain=provider` overrides as the mixed-DNS-providers
+feature above, for a cert whose domains span more than one backend even
+at enrollment time. `--token-ttl` (default `1h`) bounds how long the
+printed token stays redeemable — generating one and never using it just
+means it silently expires, nothing to clean up by hand.
+
+Does **not** edit `config.yaml` itself — same reasoning `acme-onboard` has
+always used: programmatically mutating a hand-authored, commented YAML
+file risks mangling it in a way a human editing it wouldn't. The operator
+pastes the snippet, then reloads the hub with `SIGHUP` (see "Config
+hot-reload" above) — no restart needed.
+
+### `POST /v1/enroll`
+
+The hub-side endpoint `--generate-token`'s printed token is redeemed
+against — the piece `--load-token` will call once it exists. Redeems a
+one-time enrollment secret and hands back a brand-new spoke's real bearer
+token plus the certs/domains it's authorized for — the one place in this
+API a request needs no bearer token at all, since a spoke that hasn't
+enrolled yet has nothing to present. Secrets are tracked in a new
+`enrollment_tokens` table (schema version 4): `secret` (cleartext,
+matching how bearer tokens in `config.yaml` are handled — see
 `internal/hubapi/auth.go`'s `authorize` doc comment for why that's this
 project's deliberate pattern, not an oversight), `spoke_id`, the
 pre-generated `bearer_token` to hand back, `expires_at`, and `redeemed_at`

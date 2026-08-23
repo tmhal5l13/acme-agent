@@ -7,11 +7,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -20,12 +16,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tmhal5l13/acme-agent/config"
+	"github.com/tmhal5l13/acme-agent/internal/enrolltoken"
 	"github.com/tmhal5l13/acme-agent/internal/hubapi"
 	"github.com/tmhal5l13/acme-agent/internal/hubstore"
+	"github.com/tmhal5l13/acme-agent/internal/onboard"
 	"github.com/tmhal5l13/acme-agent/internal/selfsigned"
 	"github.com/tmhal5l13/acme-agent/internal/umask"
 )
@@ -39,6 +38,16 @@ func main() {
 
 func run() error {
 	configPath := flag.String("config", "./config.yaml", "path to the hub's config.yaml")
+
+	generateToken := flag.Bool("generate-token", false, "generate a one-time spoke enrollment token and exit, instead of running as a daemon - see the other flags below")
+	gtSpokeID := flag.String("spoke-id", "", "(-generate-token) new spoke's id")
+	gtCertName := flag.String("cert-name", "", "(-generate-token) certificate name, must be unique within the spoke")
+	gtDomains := flag.String("domains", "", "(-generate-token) comma-separated domains, e.g. radius.example.com or example.com,*.example.com")
+	gtDNSProvider := flag.String("dns-provider", "", "(-generate-token) name of an entry already defined under dns_providers")
+	gtDomainDNSProviders := flag.String("domain-dns-providers", "", "(-generate-token) optional comma-separated domain=dns_provider overrides, for domains on a different provider than -dns-provider")
+	gtHubURL := flag.String("hub-url", "", "(-generate-token) URL the new spoke will dial to reach this hub; defaults to https://<tls_host or listen_addr host>:<listen_addr port>")
+	gtTokenTTL := flag.Duration("token-ttl", time.Hour, "(-generate-token) how long the printed enrollment token stays valid")
+
 	flag.Parse()
 
 	umask.Restrict()
@@ -46,6 +55,18 @@ func run() error {
 	cfg, err := config.LoadHubConfig(*configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	if *generateToken {
+		return runGenerateToken(cfg, generateTokenArgs{
+			SpokeID:            *gtSpokeID,
+			CertName:           *gtCertName,
+			Domains:            *gtDomains,
+			DNSProvider:        *gtDNSProvider,
+			DomainDNSProviders: *gtDomainDNSProviders,
+			HubURL:             *gtHubURL,
+			TTL:                *gtTokenTTL,
+		})
 	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
@@ -139,6 +160,138 @@ func run() error {
 	return nil
 }
 
+// generateTokenArgs is the -generate-token flag group, gathered into one
+// struct so runGenerateToken doesn't take eight separate parameters.
+type generateTokenArgs struct {
+	SpokeID            string
+	CertName           string
+	Domains            string
+	DNSProvider        string
+	DomainDNSProviders string
+	HubURL             string
+	TTL                time.Duration
+}
+
+// runGenerateToken is -generate-token's entire job: validate args against
+// the hub's current config (via onboard.PlanEnrollment), mint and store a
+// one-time enrollment secret, and print everything the operator needs -
+// the hub-config snippet to paste (same shape acme-onboard already
+// produces for a brand-new spoke), and one opaque token string to hand to
+// the new spoke for `acme-spoke --load-token`. See ARCHITECTURE.md "Spoke
+// enrollment" for the full workflow this is one step of.
+//
+// Deliberately does not touch config.yaml itself - same reasoning
+// internal/onboard has always used: programmatically editing a
+// hand-authored, commented YAML file risks mangling it in a way a human
+// wouldn't. The operator still pastes the snippet by hand, then reloads
+// the hub with SIGHUP (not a restart - see "Config hot-reload").
+func runGenerateToken(cfg *config.HubConfig, args generateTokenArgs) error {
+	if args.SpokeID == "" || args.CertName == "" || args.Domains == "" || args.DNSProvider == "" {
+		return fmt.Errorf("-generate-token requires -spoke-id, -cert-name, -domains, and -dns-provider")
+	}
+
+	hubURL := args.HubURL
+	if hubURL == "" {
+		u, err := defaultHubURL(cfg)
+		if err != nil {
+			return fmt.Errorf("determine hub url (pass -hub-url explicitly to override): %w", err)
+		}
+		hubURL = u
+	}
+
+	domainDNSProviders, err := parseDomainDNSProviders(args.DomainDNSProviders)
+	if err != nil {
+		return fmt.Errorf("parse -domain-dns-providers: %w", err)
+	}
+
+	plan, err := onboard.PlanEnrollment(cfg, onboard.EnrollmentRequest{
+		SpokeID:            args.SpokeID,
+		CertName:           args.CertName,
+		Domains:            strings.Split(args.Domains, ","),
+		DNSProvider:        args.DNSProvider,
+		DomainDNSProviders: domainDNSProviders,
+		HubURL:             hubURL,
+	})
+	if err != nil {
+		return fmt.Errorf("plan enrollment: %w", err)
+	}
+
+	// Idempotent (EnsureCert never touches an existing cert/key pair), so
+	// safe to call here even if the hub daemon has never actually been
+	// started yet - the fingerprint below needs a real certificate to
+	// exist regardless of whether this is the hub's very first operation.
+	if err := ensureTLS(cfg); err != nil {
+		return fmt.Errorf("prepare TLS certificate: %w", err)
+	}
+	fingerprint, err := selfsigned.Fingerprint(cfg.TLSCertFile)
+	if err != nil {
+		return fmt.Errorf("read certificate fingerprint: %w", err)
+	}
+
+	st, err := hubstore.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+	if err := st.InsertEnrollmentToken(plan.EnrollmentSecret, args.SpokeID, plan.BearerToken, time.Now().Add(args.TTL)); err != nil {
+		return fmt.Errorf("insert enrollment token: %w", err)
+	}
+
+	token, err := enrolltoken.Token{HubURL: hubURL, Fingerprint: fingerprint, Secret: plan.EnrollmentSecret}.Encode()
+	if err != nil {
+		return fmt.Errorf("encode enrollment token: %w", err)
+	}
+
+	fmt.Println("=== Add this to the hub's config.yaml under spokes: ===")
+	fmt.Print(plan.HubConfigYAML)
+	fmt.Println()
+	fmt.Printf("=== Add to the hub's env file ===\n%s=%s\n\n", plan.HubEnvVarName, plan.BearerToken)
+	fmt.Println("Then reload the hub - no restart needed:")
+	fmt.Println("  systemctl reload acme-hub   # or: kill -HUP $(pidof acme-hub)")
+	fmt.Println()
+	fmt.Printf("On the new spoke, valid for %s:\n", args.TTL)
+	fmt.Printf("  acme-spoke --load-token %s\n", token)
+
+	return nil
+}
+
+// parseDomainDNSProviders parses -domain-dns-providers's
+// "domain=provider,domain=provider" flag value.
+func parseDomainDNSProviders(s string) (map[string]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	m := make(map[string]string)
+	for _, pair := range strings.Split(s, ",") {
+		domain, provider, ok := strings.Cut(pair, "=")
+		if !ok || domain == "" || provider == "" {
+			return nil, fmt.Errorf("invalid domain=dns_provider pair %q", pair)
+		}
+		m[domain] = provider
+	}
+	return m, nil
+}
+
+// defaultHubURL derives the URL a spoke would dial to reach this hub from
+// cfg alone, when -hub-url isn't given explicitly - the same host
+// selection ensureTLS already uses for the certificate's own SAN (real,
+// dialable listen_addr host, or tls_host for a wildcard bind), paired
+// with listen_addr's port.
+func defaultHubURL(cfg *config.HubConfig) (string, error) {
+	_, port, err := net.SplitHostPort(cfg.ListenAddr)
+	if err != nil {
+		return "", fmt.Errorf("parse listen_addr: %w", err)
+	}
+	host := cfg.TLSHost
+	if host == "" {
+		host, _, err = net.SplitHostPort(cfg.ListenAddr)
+		if err != nil {
+			return "", fmt.Errorf("parse listen_addr: %w", err)
+		}
+	}
+	return "https://" + net.JoinHostPort(host, port), nil
+}
+
 // watchForReload re-reads configPath and applies it to server on every
 // SIGHUP received on sighup, until ctx is cancelled. sighup must already be
 // registered via signal.Notify by the caller, synchronously, before this
@@ -222,28 +375,11 @@ func ensureTLS(cfg *config.HubConfig) error {
 		return err
 	}
 
-	fingerprint, err := certFingerprint(cfg.TLSCertFile)
+	fingerprint, err := selfsigned.Fingerprint(cfg.TLSCertFile)
 	if err != nil {
 		return fmt.Errorf("read certificate fingerprint: %w", err)
 	}
 	slog.Info("hub TLS certificate ready", "sha256_fingerprint", fingerprint, "cert_file", cfg.TLSCertFile)
 
 	return nil
-}
-
-func certFingerprint(certPath string) (string, error) {
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		return "", err
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return "", fmt.Errorf("no PEM block found in %s", certPath)
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(sum[:]), nil
 }

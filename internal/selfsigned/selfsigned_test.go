@@ -1,7 +1,9 @@
 package selfsigned
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"net"
 	"os"
@@ -163,6 +165,77 @@ func TestGenerateCert_OverwritesExistingFilesUnconditionally(t *testing.T) {
 	}
 	if string(firstKey) == string(secondKey) {
 		t.Error("GenerateCert produced an identical key on a second call, want a genuinely new one each time")
+	}
+}
+
+// TestFingerprint_MatchesDirectComputation proves Fingerprint's value is
+// exactly sha256(parsed certificate's DER bytes) - the same computation
+// its callers (cmd/acme-hub's startup log line, internal/enrolltoken)
+// need to match independently elsewhere, not some other encoding that
+// happens to look plausible.
+func TestFingerprint_MatchesDirectComputation(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := GenerateCert(certPath, keyPath, "127.0.0.1"); err != nil {
+		t.Fatalf("GenerateCert: %v", err)
+	}
+
+	got, err := Fingerprint(certPath)
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+
+	cert := parseCert(t, certPath)
+	sum := sha256.Sum256(cert.Raw)
+	want := hex.EncodeToString(sum[:])
+
+	if got != want {
+		t.Errorf("Fingerprint returned %q, want %q (sha256 of the parsed certificate's DER bytes)", got, want)
+	}
+}
+
+func TestFingerprint_DifferentCertsHaveDifferentFingerprints(t *testing.T) {
+	dir := t.TempDir()
+	certA := filepath.Join(dir, "a.pem")
+	keyA := filepath.Join(dir, "a-key.pem")
+	certB := filepath.Join(dir, "b.pem")
+	keyB := filepath.Join(dir, "b-key.pem")
+	if err := GenerateCert(certA, keyA, "127.0.0.1"); err != nil {
+		t.Fatalf("GenerateCert a: %v", err)
+	}
+	if err := GenerateCert(certB, keyB, "127.0.0.1"); err != nil {
+		t.Fatalf("GenerateCert b: %v", err)
+	}
+
+	fpA, err := Fingerprint(certA)
+	if err != nil {
+		t.Fatalf("Fingerprint a: %v", err)
+	}
+	fpB, err := Fingerprint(certB)
+	if err != nil {
+		t.Fatalf("Fingerprint b: %v", err)
+	}
+	if fpA == fpB {
+		t.Error("got identical fingerprints for two independently generated certificates, want different")
+	}
+}
+
+func TestFingerprint_MissingFileErrors(t *testing.T) {
+	if _, err := Fingerprint("/does/not/exist.pem"); err == nil {
+		t.Fatal("expected an error for a nonexistent cert file, got nil")
+	}
+}
+
+func TestFingerprint_InvalidFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	badCert := filepath.Join(dir, "not-a-cert.pem")
+	if err := os.WriteFile(badCert, []byte("not a certificate"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	if _, err := Fingerprint(badCert); err == nil {
+		t.Fatal("expected an error for a file with no valid PEM certificate, got nil")
 	}
 }
 
