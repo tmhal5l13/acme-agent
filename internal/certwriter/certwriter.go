@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/tmhal5l13/acme-agent/internal/secureperm"
 )
 
 // Write atomically installs a certificate bundle (private key, leaf
@@ -67,22 +69,26 @@ func Write(dir string, privateKeyPEM, leafCertPEM, issuerCertPEM []byte) error {
 		if err := os.Chmod(d, 0o750); err != nil {
 			return fmt.Errorf("chmod %s: %w", d, err)
 		}
+		if err := secureperm.Protect(d); err != nil {
+			return fmt.Errorf("protect %s: %w", d, err)
+		}
 	}
 
 	fullchain := append(append([]byte{}, leafCertPEM...), issuerCertPEM...)
 
 	writes := []struct {
-		name string
-		data []byte
-		perm os.FileMode
+		name    string
+		data    []byte
+		perm    os.FileMode
+		protect bool // whether this file's content is secret - see writeAtomic
 	}{
-		{"privkey.pem", privateKeyPEM, 0o600},
-		{"cert.pem", leafCertPEM, 0o644},
-		{"fullchain.pem", fullchain, 0o644},
+		{"privkey.pem", privateKeyPEM, 0o600, true},
+		{"cert.pem", leafCertPEM, 0o644, false},
+		{"fullchain.pem", fullchain, 0o644, false},
 	}
 
 	for _, w := range writes {
-		if err := writeAtomic(filepath.Join(versionDir, w.name), w.data, w.perm); err != nil {
+		if err := writeAtomic(filepath.Join(versionDir, w.name), w.data, w.perm, w.protect); err != nil {
 			return err
 		}
 	}
@@ -120,7 +126,14 @@ func Write(dir string, privateKeyPEM, leafCertPEM, issuerCertPEM []byte) error {
 	return nil
 }
 
-func writeAtomic(path string, data []byte, perm os.FileMode) error {
+// writeAtomic writes data to path via a temp-file-then-rename swap. protect
+// marks path as holding secret material (only ever true for privkey.pem):
+// cert.pem/fullchain.pem are deliberately world-readable (perm 0o644) so
+// any reload target can read the public half no matter what user it runs
+// as, and applying secureperm.Protect (owner+SYSTEM only, on Windows) to
+// those would be a functional regression there, not an extra precaution -
+// see the perm argument's existing Unix split for the same reasoning.
+func writeAtomic(path string, data []byte, perm os.FileMode, protect bool) error {
 	tmp := path + ".tmp"
 
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
@@ -143,6 +156,15 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 	// OpenFile's perm argument is subject to umask, so set it explicitly.
 	if err := os.Chmod(tmp, perm); err != nil {
 		return fmt.Errorf("chmod %s: %w", tmp, err)
+	}
+	if protect {
+		// Protect tmp, not path - never let the secret exist under its
+		// final name with weaker-than-intended permissions, even briefly.
+		// os.Rename preserves a file's existing ACL/security descriptor, so
+		// this protection carries over to path once renamed.
+		if err := secureperm.Protect(tmp); err != nil {
+			return fmt.Errorf("protect %s: %w", tmp, err)
+		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
