@@ -391,10 +391,16 @@ GOOS=darwin  GOARCH=arm64 go build ./cmd/acme-hub   # Apple Silicon
 GOOS=darwin  GOARCH=amd64 go build ./cmd/acme-hub   # Intel - unverified, see below
 ```
 
-The systemd deployment above (`deploy/`) is Linux-only and this project's
-only tested production target; Windows/macOS builds exist so the code
-*compiles* cleanly for anyone who wants to run a spoke there, not as a
-supported deployment path with its own install tooling.
+The systemd deployment above (`deploy/`) is Linux-only, and so is the hub
+— every deployment target discussed for it has been Linux, and no
+Windows-specific work has gone into `cmd/acme-hub` itself. The **spoke**
+is different: Windows is a genuine, tested deployment target for it, with
+its own install tooling (`install-spoke.ps1` and the "Production
+deployment (Windows service)" section above) and its own CI job
+(`test-windows`, below) actually running the test suite on a real
+`windows-latest` runner — not just proving the code compiles. macOS builds
+remain compile-only: nothing about that platform has been verified beyond
+`go build` succeeding, and there's no install tooling for it.
 
 **Intel Mac (`darwin/amd64`) is explicitly deprioritized**, not actively
 verified: Apple has ended (or announced ending) Intel support, so it's not
@@ -461,13 +467,22 @@ Three platform gaps already closed, and one real gap still open:
   actively maintained anyway.
 
 CI's `cross-compile` job builds all three binaries for `windows/amd64` and
-`darwin/arm64` on every push/PR — a `go build` check only, not a full test
-run (there's no Windows/macOS runner executing the test suite) —
+`darwin/arm64` on every push/PR — a `go build` check only, no test run —
 specifically so a future platform-incompatible call (like `syscall.Umask`
 was before `internal/umask` existed) fails CI immediately instead of only
 surfacing the next time someone happens to try a cross-compile by hand.
 `darwin/amd64` is deliberately not in this matrix, per the Intel Mac note
-above.
+above. For Windows specifically, CI goes further: the separate
+`test-windows` job runs on a real `windows-latest` runner (not a
+cross-compile from Linux) and actually executes `go test`/`go test -race`
+— scoped to the packages "genuine Windows spoke support" touched
+(`internal/hook`, `internal/secureperm`, `internal/certwriter`,
+`internal/store`, `internal/winservice`, `cmd/acme-spoke`), not a full
+`./...`, since `cmd/acme-hub`'s own test suite has a pre-existing
+Unix-only assumption (`syscall.Kill` in `main_test.go`) that's out of
+scope here — the hub was never a Windows deployment target to begin with.
+There's still no macOS runner in CI at all; that platform's `go build`
+check in `cross-compile` is the only verification it gets.
 
 ## Mixed DNS providers on one certificate
 
