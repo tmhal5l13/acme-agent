@@ -25,11 +25,19 @@ import (
 // and file N+1 strands a new key next to an old, non-matching
 // certificate. Fixed with the standard pattern for atomically swapping a
 // whole directory's worth of files: write the complete new bundle into
-// its own versioned directory, then atomically repoint a "current"
-// symlink at it. Renaming a symlink is a single atomic operation on the
-// same filesystem, exactly like the per-file rename this package already
-// relied on before — this just applies that same guarantee to the bundle
-// as a whole instead of to each file individually.
+// its own versioned directory, then atomically repoint "current" at it —
+// see swapCurrent's two platform-specific implementations. On Unix,
+// "current" is a symlink: renaming a symlink is a single atomic operation
+// on the same filesystem, exactly like the per-file rename this package
+// already relies on elsewhere — this just applies that same guarantee to
+// the bundle as a whole instead of to each file individually. On Windows,
+// symlinks require a privilege a non-elevated spoke service won't have, so
+// "current" is instead a persistent directory whose NTFS junction (a
+// mount-point reparse point) gets retargeted in place — not quite as
+// strong a guarantee as a symlink rename (see certwriter_windows.go's
+// swapCurrent doc comment for exactly how it differs and why the failure
+// mode it leaves behind is still safe), but the closest Windows permits
+// without requiring elevation.
 //
 // Callers (reload hooks, the actual consuming service) should read from
 // dir/current/{privkey.pem,cert.pem,fullchain.pem} — never from dir
@@ -98,25 +106,17 @@ func Write(dir string, privateKeyPEM, leafCertPEM, issuerCertPEM []byte) error {
 	// recording their names still need their own fsync to be durable: a
 	// file's fsync only guarantees that file's data, not that the
 	// directory pointing to it survives a crash. Same reasoning applies to
-	// dir itself after the symlink swap below.
+	// dir itself after the swapCurrent call below.
 	if err := fsyncDir(versionDir); err != nil {
 		return err
 	}
 
-	// Atomically point "current" at the new version. Renaming a symlink is
-	// the same single-syscall atomic replace this package already relies
-	// on for individual files — nothing ever observes a symlink that's
-	// half-old, half-new, the way the three plain files above could have
-	// been observed mid-swap under the previous, non-versioned layout.
-	currentPath := filepath.Join(dir, "current")
-	tmpSymlink := currentPath + ".tmp"
-	_ = os.Remove(tmpSymlink) // clean up a leftover from a prior crash, if any
-	relTarget := filepath.Join("versions", versionName)
-	if err := os.Symlink(relTarget, tmpSymlink); err != nil {
-		return fmt.Errorf("create current symlink: %w", err)
-	}
-	if err := os.Rename(tmpSymlink, currentPath); err != nil {
-		return fmt.Errorf("swap current symlink: %w", err)
+	// Atomically point "current" at the new version - a symlink rename on
+	// Unix, an NTFS junction retarget on Windows (see swapCurrent's two
+	// platform-specific implementations for why they differ and how each
+	// still avoids ever exposing a torn, half-old-half-new "current").
+	if err := swapCurrent(dir, versionName); err != nil {
+		return err
 	}
 
 	if err := fsyncDir(dir); err != nil {
