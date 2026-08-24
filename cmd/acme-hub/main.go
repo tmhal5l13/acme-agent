@@ -25,6 +25,7 @@ import (
 	"github.com/tmhal5l13/acme-agent/internal/hubapi"
 	"github.com/tmhal5l13/acme-agent/internal/hubstore"
 	"github.com/tmhal5l13/acme-agent/internal/onboard"
+	"github.com/tmhal5l13/acme-agent/internal/secureperm"
 	"github.com/tmhal5l13/acme-agent/internal/selfsigned"
 	"github.com/tmhal5l13/acme-agent/internal/umask"
 )
@@ -80,6 +81,9 @@ func run() error {
 	}
 	if err := os.Chmod(cfg.DataDir, 0o750); err != nil { // MkdirAll's mode is subject to umask; chmod explicitly
 		return fmt.Errorf("chmod data_dir: %w", err)
+	}
+	if err := secureperm.Protect(cfg.DataDir); err != nil {
+		return fmt.Errorf("protect data_dir: %w", err)
 	}
 
 	st, err := hubstore.Open(cfg.DBPath)
@@ -413,6 +417,9 @@ func ensureTLS(cfg *config.HubConfig) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.TLSKeyFile), 0o750); err != nil {
 		return fmt.Errorf("create tls_key_file directory: %w", err)
+	}
+	if err := secureperm.Protect(filepath.Dir(cfg.TLSKeyFile)); err != nil {
+		return fmt.Errorf("protect tls_key_file directory: %w", err)
 	}
 
 	host := cfg.TLSHost

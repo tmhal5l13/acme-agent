@@ -370,7 +370,7 @@ change is guaranteed to preserve, and it's not in CI's `cross-compile`
 matrix below. Apple Silicon (`darwin/arm64`) is the macOS target that's
 actually kept working.
 
-One platform gap already closed, and one real gap still open:
+Two platform gaps already closed, and one real gap still open:
 
 - **`internal/hook` runs the OS-native shell, not a hardcoded `sh`.** A
   Windows install has no `sh` at all, so `reload_hook`/`notify_hook` used to
@@ -378,15 +378,26 @@ One platform gap already closed, and one real gap still open:
   `//go:build` split, same shape as `internal/umask` below) pick `sh -c` on
   Unix and `cmd.exe /C` on Windows — an operator's hook command needs to use
   that platform's own shell syntax (`%VAR%` not `$VAR`, on Windows).
-- **No process umask on Windows.** `internal/umask` restricts the process
-  umask to `0077` (owner-only) before either binary creates any files —
-  Unix only, via a `//go:build !windows` file. Windows has no umask
-  concept at all (`syscall.Umask` isn't defined there), and file access is
-  governed by ACLs inherited from the parent directory instead, which this
-  project does not currently set restrictively. `umask_windows.go` is a
-  deliberate no-op documenting this, not a silent gap — a Windows spoke's
-  data directory permissions are whatever the parent directory's ACLs
-  already grant.
+- **No process umask on Windows, so every secret-bearing path this
+  codebase writes now sets its own Windows ACL explicitly.**
+  `internal/umask` still restricts the process umask to `0077` before
+  either binary creates any files, Unix-only (`syscall.Umask` isn't defined
+  on Windows, and file access is governed by ACLs inherited from the parent
+  directory instead — `umask_windows.go` stays a documented no-op for that
+  reason). What's new is `internal/secureperm.Protect`, called right
+  alongside every `os.Chmod` that already exists at a path holding a
+  private key, a bearer token, or the SQLite database (`internal/certwriter`,
+  `internal/selfsigned`, `internal/store`, `internal/hubstore`, both
+  binaries' `DataDir` setup): a no-op on Unix (the existing `os.Chmod`
+  already does the real work there), and on Windows a DACL restricting the
+  path to the current user and `SYSTEM` only, replacing whatever it
+  inherited from its parent. Deliberately *not* applied to `cert.pem`/
+  `fullchain.pem` — those stay world-readable by design (0644 on Unix) so a
+  reload target running as any user can read the public half; applying the
+  same restriction there would be a functional regression, not an extra
+  precaution. The directory-level restriction's interaction with a reload
+  target's own folder traversal hasn't been verified against a real Windows
+  box yet — see the Windows CI job below.
 - **Cross-compiled macOS binaries aren't code-signed.** `go build` run
   natively on a Mac ad-hoc-signs its own `darwin/arm64` output
   automatically; a binary cross-compiled from Linux/Windows isn't signed

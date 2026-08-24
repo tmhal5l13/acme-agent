@@ -20,6 +20,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/tmhal5l13/acme-agent/internal/secureperm"
 )
 
 const validity = 10 * 365 * 24 * time.Hour
@@ -95,6 +97,9 @@ func GenerateCert(certPath, keyPath, host string) error {
 	}
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}), 0o600); err != nil {
 		return fmt.Errorf("write key: %w", err)
+	}
+	if err := secureperm.Protect(keyPath); err != nil {
+		return fmt.Errorf("protect key: %w", err)
 	}
 
 	return nil

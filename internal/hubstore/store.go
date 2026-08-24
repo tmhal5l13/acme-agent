@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/tmhal5l13/acme-agent/internal/secureperm"
 	_ "modernc.org/sqlite"
 )
 
@@ -88,6 +89,16 @@ func Open(path string) (*Store, error) {
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
+
+	// The schema.Exec above guarantees the database file itself now exists
+	// (sql.Open is lazy and doesn't create it). It holds every spoke's
+	// bearer tokens and every DNS provider's credentials in cleartext, so
+	// it gets the same Windows ACL restriction applied to every other
+	// secret-bearing path this codebase writes - see internal/secureperm.
+	if err := secureperm.Protect(path); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("protect database file: %w", err)
 	}
 
 	return &Store{db: db}, nil

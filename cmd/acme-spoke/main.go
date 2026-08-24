@@ -31,6 +31,7 @@ import (
 	"github.com/tmhal5l13/acme-agent/internal/enrolltoken"
 	"github.com/tmhal5l13/acme-agent/internal/hubclient"
 	"github.com/tmhal5l13/acme-agent/internal/onboard"
+	"github.com/tmhal5l13/acme-agent/internal/secureperm"
 	"github.com/tmhal5l13/acme-agent/internal/spokeagent"
 	"github.com/tmhal5l13/acme-agent/internal/store"
 	"github.com/tmhal5l13/acme-agent/internal/umask"
@@ -77,6 +78,9 @@ func run() error {
 	}
 	if err := os.Chmod(cfg.DataDir, 0o750); err != nil { // MkdirAll's mode is subject to umask; chmod explicitly
 		return fmt.Errorf("chmod data_dir: %w", err)
+	}
+	if err := secureperm.Protect(cfg.DataDir); err != nil {
+		return fmt.Errorf("protect data_dir: %w", err)
 	}
 
 	st, err := store.Open(cfg.DBPath)
