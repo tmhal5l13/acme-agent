@@ -27,13 +27,17 @@ func makeVersion(t *testing.T, dir string, n int) string {
 	return name
 }
 
-// setCurrent repoints dir/current at version, the same atomic-rename
-// pattern Write itself uses.
+// setCurrent repoints dir/current at version via the package's own
+// swapCurrent - not a hand-rolled os.Symlink call, which on Windows would
+// create an actual symlink reparse point rather than the junction
+// production's swapCurrent uses there, silently testing a different
+// mechanism than the one that actually runs (confirmed the hard way: this
+// mismatch is exactly what made TestPrune_* fail on a real windows-latest
+// CI run before this fix, with readCurrentVersion correctly rejecting the
+// wrong reparse tag it found).
 func setCurrent(t *testing.T, dir, version string) {
 	t.Helper()
-	currentPath := filepath.Join(dir, "current")
-	_ = os.Remove(currentPath)
-	if err := os.Symlink(filepath.Join("versions", version), currentPath); err != nil {
+	if err := swapCurrent(dir, version); err != nil {
 		t.Fatalf("set current to %s: %v", version, err)
 	}
 }
