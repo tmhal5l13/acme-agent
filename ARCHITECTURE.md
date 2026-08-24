@@ -370,8 +370,14 @@ change is guaranteed to preserve, and it's not in CI's `cross-compile`
 matrix below. Apple Silicon (`darwin/arm64`) is the macOS target that's
 actually kept working.
 
-Two real platform gaps to know about:
+One platform gap already closed, and one real gap still open:
 
+- **`internal/hook` runs the OS-native shell, not a hardcoded `sh`.** A
+  Windows install has no `sh` at all, so `reload_hook`/`notify_hook` used to
+  be silently non-functional there. `hook_unix.go`/`hook_windows.go` (a
+  `//go:build` split, same shape as `internal/umask` below) pick `sh -c` on
+  Unix and `cmd.exe /C` on Windows — an operator's hook command needs to use
+  that platform's own shell syntax (`%VAR%` not `$VAR`, on Windows).
 - **No process umask on Windows.** `internal/umask` restricts the process
   umask to `0077` (owner-only) before either binary creates any files —
   Unix only, via a `//go:build !windows` file. Windows has no umask
