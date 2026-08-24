@@ -35,6 +35,7 @@ import (
 	"github.com/tmhal5l13/acme-agent/internal/spokeagent"
 	"github.com/tmhal5l13/acme-agent/internal/store"
 	"github.com/tmhal5l13/acme-agent/internal/umask"
+	"github.com/tmhal5l13/acme-agent/internal/winservice"
 )
 
 func main() {
@@ -102,6 +103,16 @@ func run() error {
 		agent.RunOnce(ctx)
 		return nil
 	}
+
+	// done lets winservice's SCM handler (a no-op everywhere but a real
+	// Windows service) know agent.Run has actually finished shutting down
+	// before it reports the service Stopped - see RunIfService's doc
+	// comment for why that ordering matters.
+	done := make(chan struct{})
+	if err := winservice.RunIfService(stop, done); err != nil {
+		return fmt.Errorf("windows service: %w", err)
+	}
+	defer close(done)
 
 	agent.Run(ctx)
 	return nil
