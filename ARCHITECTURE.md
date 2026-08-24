@@ -436,9 +436,14 @@ Three platform gaps already closed, and one real gap still open:
   `fullchain.pem` — those stay world-readable by design (0644 on Unix) so a
   reload target running as any user can read the public half; applying the
   same restriction there would be a functional regression, not an extra
-  precaution. The directory-level restriction's interaction with a reload
-  target's own folder traversal hasn't been verified against a real Windows
-  box yet — see the Windows CI job below.
+  precaution. The DACL-setting mechanism itself is confirmed working
+  against a real `windows-latest` CI run (`internal/secureperm`'s tests
+  read the applied DACL back via `GetNamedSecurityInfo` and check its ACE
+  count). What that run does *not* cover: whether a reload target actually
+  running as a *different* account than the spoke can still traverse into
+  a Protect()-restricted directory to reach the world-readable files
+  inside it — that needs a second real account in the test environment,
+  which this CI job doesn't set up.
 - **No `os.Symlink` on Windows for `internal/certwriter`'s atomic "current"
   swap.** Creating a symlink needs the same elevated privilege as above;
   `certwriter_unix.go`/`certwriter_windows.go` split `swapCurrent`
@@ -452,10 +457,18 @@ Three platform gaps already closed, and one real gap still open:
   directory rather than a torn mix of old and new files — safe, just not
   quite the single-syscall guarantee a symlink rename gives on Unix. The
   reparse-point byte layout is hand-built (`golang.org/x/sys/windows`
-  doesn't export the mount-point buffer type), verified against Go's own
-  standard library test coverage of the same mechanism rather than the
-  header docs alone, but — like the ACL work above — not yet exercised on
-  a real Windows box.
+  doesn't export the mount-point buffer type) and confirmed working
+  end-to-end against a real `windows-latest` run — which is also where two
+  genuine bugs surfaced and got fixed before this landed: `fsyncDir`
+  (unrelated to the junction work, but only ever exercised on Unix before)
+  called `Sync()` on a directory handle, which Windows rejects outright
+  ("Access is denied" — now a documented no-op there, since NTFS's own
+  metadata journaling doesn't need the explicit call POSIX does); and
+  `golang.org/x/sys/windows`'s own `Readlink` tripped `checkptr` fatally
+  under `-race` via an internal unsafe-pointer cast, worked around by
+  reading the junction back with `encoding/binary` instead of that
+  library function. Exactly the kind of thing a cross-compile-only check
+  would never have caught.
 - **Cross-compiled macOS binaries aren't code-signed.** `go build` run
   natively on a Mac ad-hoc-signs its own `darwin/arm64` output
   automatically; a binary cross-compiled from Linux/Windows isn't signed
