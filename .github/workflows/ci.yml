@@ -88,12 +88,17 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Build-only, no test run: there's no Windows/macOS runner here to
-      # execute the resulting binaries on, and this project has no cgo, so
-      # a clean `go build` for each target is what actually would have
-      # caught the syscall.Umask-on-Windows bug internal/umask fixes -
-      # catching a future regression like it here, automatically, rather
-      # than only when someone happens to try a cross-compile by hand.
+      # Build-only, no test run: there's no macOS runner here to execute
+      # the resulting binary on, and this project has no cgo, so a clean
+      # `go build` is what actually would have caught the
+      # syscall.Umask-on-Windows bug internal/umask fixes - catching a
+      # future regression like it here, automatically, rather than only
+      # when someone happens to try a cross-compile by hand. Windows gets
+      # real test execution too, on a real windows-latest runner - see the
+      # test-windows job below; this job still cross-compiles it from
+      # Linux alongside darwin/arm64, since a build-only check on every
+      # push is cheap and catches a compile break faster than waiting for
+      # test-windows' longer-running job to fail the same way.
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -102,3 +107,29 @@ jobs:
           go build -o /dev/null ./cmd/acme-hub
           go build -o /dev/null ./cmd/acme-spoke
           go build -o /dev/null ./cmd/acme-onboard
+
+  test-windows:
+    name: Test (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Scoped to the packages touched by "genuine Windows spoke support"
+      # (internal/hook's OS-native shell, internal/secureperm's Windows
+      # ACLs, internal/certwriter's junction-based atomic swap,
+      # internal/winservice's SCM integration, and their spoke-side
+      # callers) rather than a full ./... - cmd/acme-hub's own test suite
+      # has a pre-existing Unix-only assumption (syscall.Kill in
+      # main_test.go) that's out of scope here: the hub stays a Linux-only
+      # deployment target (see ARCHITECTURE.md's "Cross-platform builds"),
+      # only the spoke needed to actually work on Windows.
+      - name: Test
+        run: go test ./internal/hook/... ./internal/secureperm/... ./internal/certwriter/... ./internal/store/... ./internal/winservice/... ./cmd/acme-spoke/...
+
+      - name: Test (race detector)
+        run: go test -race ./internal/hook/... ./internal/secureperm/... ./internal/certwriter/... ./internal/store/... ./internal/winservice/... ./cmd/acme-spoke/...

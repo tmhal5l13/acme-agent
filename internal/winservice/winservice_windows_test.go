@@ -18,10 +18,15 @@ import (
 // isn't free to kill it, before the caller's own cleanup has actually
 // finished.
 func TestHandler_StopCallsStopAndWaitsForDone(t *testing.T) {
-	var stopCalled bool
+	// stopCalled is a channel, not a bool, so checking it below
+	// synchronizes-with the write inside stop (a bool written in the
+	// Execute goroutine and read from the test goroutine with no other
+	// synchronization between them is exactly the data race go test -race
+	// caught here on a real windows-latest run before this fix).
+	stopCalled := make(chan struct{})
 	done := make(chan struct{})
 	h := &handler{
-		stop: func() { stopCalled = true },
+		stop: func() { close(stopCalled) },
 		done: done,
 	}
 
@@ -53,7 +58,9 @@ func TestHandler_StopCallsStopAndWaitsForDone(t *testing.T) {
 		t.Fatal("Execute returned before done was closed")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if !stopCalled {
+	select {
+	case <-stopCalled:
+	default:
 		t.Error("stop was not called after an SCM Stop request")
 	}
 

@@ -391,10 +391,16 @@ GOOS=darwin  GOARCH=arm64 go build ./cmd/acme-hub   # Apple Silicon
 GOOS=darwin  GOARCH=amd64 go build ./cmd/acme-hub   # Intel - unverified, see below
 ```
 
-The systemd deployment above (`deploy/`) is Linux-only and this project's
-only tested production target; Windows/macOS builds exist so the code
-*compiles* cleanly for anyone who wants to run a spoke there, not as a
-supported deployment path with its own install tooling.
+The systemd deployment above (`deploy/`) is Linux-only, and so is the hub
+— every deployment target discussed for it has been Linux, and no
+Windows-specific work has gone into `cmd/acme-hub` itself. The **spoke**
+is different: Windows is a genuine, tested deployment target for it, with
+its own install tooling (`install-spoke.ps1` and the "Production
+deployment (Windows service)" section above) and its own CI job
+(`test-windows`, below) actually running the test suite on a real
+`windows-latest` runner — not just proving the code compiles. macOS builds
+remain compile-only: nothing about that platform has been verified beyond
+`go build` succeeding, and there's no install tooling for it.
 
 **Intel Mac (`darwin/amd64`) is explicitly deprioritized**, not actively
 verified: Apple has ended (or announced ending) Intel support, so it's not
@@ -430,9 +436,14 @@ Three platform gaps already closed, and one real gap still open:
   `fullchain.pem` — those stay world-readable by design (0644 on Unix) so a
   reload target running as any user can read the public half; applying the
   same restriction there would be a functional regression, not an extra
-  precaution. The directory-level restriction's interaction with a reload
-  target's own folder traversal hasn't been verified against a real Windows
-  box yet — see the Windows CI job below.
+  precaution. The DACL-setting mechanism itself is confirmed working
+  against a real `windows-latest` CI run (`internal/secureperm`'s tests
+  read the applied DACL back via `GetNamedSecurityInfo` and check its ACE
+  count). What that run does *not* cover: whether a reload target actually
+  running as a *different* account than the spoke can still traverse into
+  a Protect()-restricted directory to reach the world-readable files
+  inside it — that needs a second real account in the test environment,
+  which this CI job doesn't set up.
 - **No `os.Symlink` on Windows for `internal/certwriter`'s atomic "current"
   swap.** Creating a symlink needs the same elevated privilege as above;
   `certwriter_unix.go`/`certwriter_windows.go` split `swapCurrent`
@@ -446,10 +457,18 @@ Three platform gaps already closed, and one real gap still open:
   directory rather than a torn mix of old and new files — safe, just not
   quite the single-syscall guarantee a symlink rename gives on Unix. The
   reparse-point byte layout is hand-built (`golang.org/x/sys/windows`
-  doesn't export the mount-point buffer type), verified against Go's own
-  standard library test coverage of the same mechanism rather than the
-  header docs alone, but — like the ACL work above — not yet exercised on
-  a real Windows box.
+  doesn't export the mount-point buffer type) and confirmed working
+  end-to-end against a real `windows-latest` run — which is also where two
+  genuine bugs surfaced and got fixed before this landed: `fsyncDir`
+  (unrelated to the junction work, but only ever exercised on Unix before)
+  called `Sync()` on a directory handle, which Windows rejects outright
+  ("Access is denied" — now a documented no-op there, since NTFS's own
+  metadata journaling doesn't need the explicit call POSIX does); and
+  `golang.org/x/sys/windows`'s own `Readlink` tripped `checkptr` fatally
+  under `-race` via an internal unsafe-pointer cast, worked around by
+  reading the junction back with `encoding/binary` instead of that
+  library function. Exactly the kind of thing a cross-compile-only check
+  would never have caught.
 - **Cross-compiled macOS binaries aren't code-signed.** `go build` run
   natively on a Mac ad-hoc-signs its own `darwin/arm64` output
   automatically; a binary cross-compiled from Linux/Windows isn't signed
@@ -461,13 +480,22 @@ Three platform gaps already closed, and one real gap still open:
   actively maintained anyway.
 
 CI's `cross-compile` job builds all three binaries for `windows/amd64` and
-`darwin/arm64` on every push/PR — a `go build` check only, not a full test
-run (there's no Windows/macOS runner executing the test suite) —
+`darwin/arm64` on every push/PR — a `go build` check only, no test run —
 specifically so a future platform-incompatible call (like `syscall.Umask`
 was before `internal/umask` existed) fails CI immediately instead of only
 surfacing the next time someone happens to try a cross-compile by hand.
 `darwin/amd64` is deliberately not in this matrix, per the Intel Mac note
-above.
+above. For Windows specifically, CI goes further: the separate
+`test-windows` job runs on a real `windows-latest` runner (not a
+cross-compile from Linux) and actually executes `go test`/`go test -race`
+— scoped to the packages "genuine Windows spoke support" touched
+(`internal/hook`, `internal/secureperm`, `internal/certwriter`,
+`internal/store`, `internal/winservice`, `cmd/acme-spoke`), not a full
+`./...`, since `cmd/acme-hub`'s own test suite has a pre-existing
+Unix-only assumption (`syscall.Kill` in `main_test.go`) that's out of
+scope here — the hub was never a Windows deployment target to begin with.
+There's still no macOS runner in CI at all; that platform's `go build`
+check in `cross-compile` is the only verification it gets.
 
 ## Mixed DNS providers on one certificate
 

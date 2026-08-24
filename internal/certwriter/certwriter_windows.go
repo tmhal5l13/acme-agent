@@ -165,19 +165,95 @@ func buildMountPointBuffer(target string) ([]byte, error) {
 
 // readCurrentVersion returns the version-directory name dir/current's
 // junction currently targets, or "" if dir/current doesn't exist yet -
-// used by Prune to know which version must never be deleted. Uses
-// golang.org/x/sys/windows's own Readlink, which already handles
-// IO_REPARSE_TAG_MOUNT_POINT (not just IO_REPARSE_TAG_SYMLINK) - no need
-// to hand-roll the read side the way buildMountPointBuffer hand-rolls the
-// write side, since x/sys exports this one already.
+// used by Prune to know which version must never be deleted.
+//
+// Deliberately does not use golang.org/x/sys/windows's own Readlink
+// (which already handles IO_REPARSE_TAG_MOUNT_POINT, not just
+// IO_REPARSE_TAG_SYMLINK, and would otherwise be the obvious reuse):
+// confirmed via a real windows-latest CI run under go test -race that its
+// internal unsafe.Pointer array-overlay cast (casting a 1-element
+// PathBuffer field to a much larger fixed-size array to index past it)
+// trips checkptr's "converted pointer straddles multiple allocations"
+// fatal error - not a suspicion, an actual crash observed in CI. Parsing
+// the bytes manually with encoding/binary, the same way
+// buildMountPointBuffer already builds them on the write side, avoids the
+// unsafe cast entirely.
 func readCurrentVersion(dir string) (string, error) {
-	buf := make([]byte, 4096)
-	n, err := windows.Readlink(filepath.Join(dir, "current"), buf)
-	if err != nil {
+	currentPath := filepath.Join(dir, "current")
+	if _, err := os.Stat(currentPath); err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
 		return "", err
 	}
-	return filepath.Base(string(buf[:n])), nil
+
+	target, err := readJunctionTarget(currentPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(target), nil
 }
+
+// readJunctionTarget reads back the PrintName a junction at path currently
+// targets, via FSCTL_GET_REPARSE_POINT - the read-side counterpart of
+// buildMountPointBuffer's write-side encoding.
+func readJunctionTarget(path string) (string, error) {
+	linkPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", fmt.Errorf("encode path: %w", err)
+	}
+	h, err := windows.CreateFile(linkPtr, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", path, err)
+	}
+	defer windows.CloseHandle(h)
+
+	const maxReparseDataBufferSize = 16 * 1024
+	buf := make([]byte, maxReparseDataBufferSize)
+	var bytesReturned uint32
+	if err := windows.DeviceIoControl(h, windows.FSCTL_GET_REPARSE_POINT,
+		nil, 0, &buf[0], uint32(len(buf)), &bytesReturned, nil); err != nil {
+		return "", fmt.Errorf("get reparse point: %w", err)
+	}
+	buf = buf[:bytesReturned]
+
+	if len(buf) < 16 {
+		return "", fmt.Errorf("reparse buffer too short: %d bytes", len(buf))
+	}
+	if tag := binary.LittleEndian.Uint32(buf[0:4]); tag != windows.IO_REPARSE_TAG_MOUNT_POINT {
+		return "", fmt.Errorf("unexpected reparse tag %#x, want IO_REPARSE_TAG_MOUNT_POINT", tag)
+	}
+
+	// Header(8) + SubstituteNameOffset/Length(4) + PrintNameOffset(2) +
+	// PrintNameLength(2) = 16 bytes before PathBuffer starts - matches
+	// buildMountPointBuffer's own layout exactly.
+	printOffset := binary.LittleEndian.Uint16(buf[12:14])
+	printLen := binary.LittleEndian.Uint16(buf[14:16])
+	pathBuf := buf[16:]
+	if int(printOffset)+int(printLen) > len(pathBuf) {
+		return "", fmt.Errorf("print name offset/length out of range")
+	}
+	printBytes := pathBuf[printOffset : printOffset+printLen]
+
+	u16 := make([]uint16, len(printBytes)/2)
+	for i := range u16 {
+		u16[i] = binary.LittleEndian.Uint16(printBytes[i*2 : i*2+2])
+	}
+	return windows.UTF16ToString(u16), nil
+}
+
+// fsyncDir is a no-op on Windows. The Unix implementation exists because
+// several POSIX filesystems (ext4 among them) don't guarantee a directory
+// entry (a file creation, rename, or removal within it) is durable across
+// a crash without an explicit fsync of the directory itself, separate from
+// fsyncing the file. NTFS doesn't have this gap: directory metadata
+// updates go through its own transactional log as a normal part of every
+// operation, with no equivalent userspace call needed (and, in practice,
+// none reliably available - os.Open's directory handle lacks the write
+// access FlushFileBuffers requires, confirmed by this exact call failing
+// with "Access is denied" against a real windows-latest CI run before
+// this function existed). This isn't a gap being silently accepted the
+// way internal/umask's Windows no-op is - it reflects a real difference
+// in what each filesystem already guarantees on its own.
+func fsyncDir(dir string) error { return nil }
