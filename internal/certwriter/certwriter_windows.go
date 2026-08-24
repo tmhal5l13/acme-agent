@@ -181,3 +181,18 @@ func readCurrentVersion(dir string) (string, error) {
 	}
 	return filepath.Base(string(buf[:n])), nil
 }
+
+// fsyncDir is a no-op on Windows. The Unix implementation exists because
+// several POSIX filesystems (ext4 among them) don't guarantee a directory
+// entry (a file creation, rename, or removal within it) is durable across
+// a crash without an explicit fsync of the directory itself, separate from
+// fsyncing the file. NTFS doesn't have this gap: directory metadata
+// updates go through its own transactional log as a normal part of every
+// operation, with no equivalent userspace call needed (and, in practice,
+// none reliably available - os.Open's directory handle lacks the write
+// access FlushFileBuffers requires, confirmed by this exact call failing
+// with "Access is denied" against a real windows-latest CI run before
+// this function existed). This isn't a gap being silently accepted the
+// way internal/umask's Windows no-op is - it reflects a real difference
+// in what each filesystem already guarantees on its own.
+func fsyncDir(dir string) error { return nil }

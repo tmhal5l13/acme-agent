@@ -179,19 +179,3 @@ func randomHex(n int) (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-
-// fsyncDir fsyncs a directory's own metadata (which names point to which
-// inodes) rather than any file's contents — required on POSIX for a file
-// creation, rename, or removal within it to be durable across a crash,
-// distinct from and in addition to fsyncing the file itself.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open %s for fsync: %w", dir, err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("fsync %s: %w", dir, err)
-	}
-	return nil
-}
