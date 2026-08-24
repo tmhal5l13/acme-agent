@@ -235,6 +235,41 @@ populated the standard way via `EnvironmentFile=`; `acme-hub.env` is
 `0640`, group `acme-hub-secrets` — see "Config hot-reload" below for why
 the hub's case needs more than that.
 
+## Production deployment (Windows service)
+
+The spoke — not the hub, which stays a Linux-only deployment target — can
+also run as a real, registered Windows service instead of a bare console
+process:
+
+```
+deploy\install-spoke.ps1 -BinaryPath C:\...\acme-spoke.exe -ConfigPath C:\...\config.yaml
+```
+
+`internal/winservice` (a `//go:build` split, no-op everywhere but Windows)
+is what makes this work: `cmd/acme-spoke/main.go` calls
+`winservice.RunIfService(stop, done)` unconditionally right after building
+the same `stop` func it already derives from `signal.NotifyContext` — a
+no-op immediately returning on Unix or an interactive Windows console run,
+and on a real registered service, SCM integration running in its own
+goroutine alongside `agent.Run(ctx)`, not blocking it. An SCM Stop/Shutdown
+request calls that same `stop` func — identical shutdown logic to an
+interactive Ctrl+C or `SIGTERM`, not a second path to keep in sync — and
+waits for `done` (closed by `main.go` once `agent.Run` actually returns)
+before reporting the service `Stopped`, so the SCM can't consider the
+service down, and isn't free to kill it, while cleanup is still running.
+
+`install-spoke.ps1` registers the service running as `LocalSystem` by
+default — the simplest option, but a materially higher-privilege default
+than the Linux install's dedicated, unprivileged `acme-spoke` user plus one
+narrowly scoped sudoers rule (above). `LocalSystem` can do essentially
+anything on the box, not just what `reload_hook` needs; an operator wanting
+the tighter equivalent should register the service under its own virtual
+service account (`NT SERVICE\acme-spoke`) and grant that account only what
+`reload_hook` actually requires instead — a per-deployment decision the
+install script deliberately doesn't make for you, the same way
+`acme-spoke.sudoers.example` is provided rather than force-installed on
+Linux.
+
 ## Database-backed desired state
 
 Which spokes exist, their bearer tokens, their certificate/DNS-provider
