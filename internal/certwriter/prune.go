@@ -52,11 +52,10 @@ func Prune(dir string) error {
 	// newest without parsing anything back into a time.Time.
 	sort.Strings(names)
 
-	current, err := os.Readlink(filepath.Join(dir, "current"))
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read current symlink: %w", err)
+	currentVersion, err := readCurrentVersion(dir)
+	if err != nil {
+		return fmt.Errorf("read current version: %w", err)
 	}
-	currentVersion := filepath.Base(current) // "" if current doesn't exist (err was NotExist) or on read failure above already returned
 
 	keep := make(map[string]bool, keepVersions+1)
 	for _, name := range names[len(names)-keepVersions:] {

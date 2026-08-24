@@ -1,3 +1,7 @@
+//go:build !windows
+
+// These tests assert on "current" being a symlink and on Unix permission
+// bits - see certwriter_windows_test.go for the junction/ACL equivalents.
 package certwriter
 
 import (

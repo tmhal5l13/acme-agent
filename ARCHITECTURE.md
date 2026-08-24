@@ -370,7 +370,7 @@ change is guaranteed to preserve, and it's not in CI's `cross-compile`
 matrix below. Apple Silicon (`darwin/arm64`) is the macOS target that's
 actually kept working.
 
-Two platform gaps already closed, and one real gap still open:
+Three platform gaps already closed, and one real gap still open:
 
 - **`internal/hook` runs the OS-native shell, not a hardcoded `sh`.** A
   Windows install has no `sh` at all, so `reload_hook`/`notify_hook` used to
@@ -398,6 +398,23 @@ Two platform gaps already closed, and one real gap still open:
   precaution. The directory-level restriction's interaction with a reload
   target's own folder traversal hasn't been verified against a real Windows
   box yet — see the Windows CI job below.
+- **No `os.Symlink` on Windows for `internal/certwriter`'s atomic "current"
+  swap.** Creating a symlink needs the same elevated privilege as above;
+  `certwriter_unix.go`/`certwriter_windows.go` split `swapCurrent`
+  accordingly. Windows can't atomically replace one directory with another
+  via rename the way a symlink can be re-pointed, so `current` is instead
+  created once as a persistent directory and retargeted in place as an
+  NTFS junction (a mount-point reparse point, which — unlike a symlink —
+  doesn't require `SeCreateSymbolicLinkPrivilege`) each time `Write` runs:
+  clear whatever reparse data it currently holds, then set the new target.
+  A crash between those two steps leaves `current` as a plain, empty
+  directory rather than a torn mix of old and new files — safe, just not
+  quite the single-syscall guarantee a symlink rename gives on Unix. The
+  reparse-point byte layout is hand-built (`golang.org/x/sys/windows`
+  doesn't export the mount-point buffer type), verified against Go's own
+  standard library test coverage of the same mechanism rather than the
+  header docs alone, but — like the ACL work above — not yet exercised on
+  a real Windows box.
 - **Cross-compiled macOS binaries aren't code-signed.** `go build` run
   natively on a Mac ad-hoc-signs its own `darwin/arm64` output
   automatically; a binary cross-compiled from Linux/Windows isn't signed
