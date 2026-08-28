@@ -1395,3 +1395,18 @@ The manual rotation procedure:
   real non-Let's-Encrypt CA) to close, and every live test in this
   project's history besides the new EAB one has used Let's Encrypt
   staging or pebble.
+- **TODO: the spoke doesn't discover certificates that already exist on a
+  host.** Every cert a spoke manages today has to be requested fresh
+  through this project's own ACME flow from scratch — there's no path for
+  a spoke being installed onto a server that already has a live
+  certificate (from `certbot`, a manual install, or a prior non-acme-agent
+  tool) to detect it, adopt its existing install location, and start
+  managing its renewal without first replacing it with a brand-new
+  issuance. Worth doing at some point since it's a real onboarding
+  friction point (a cutover forces a cert swap on day one, on every
+  pre-existing host, whether or not the operator wanted one yet), but
+  it's a genuinely new capability, not a bug fix — it needs its own design
+  pass (how "discover" would even work: scan well-known paths? read
+  existing web-server/service config? require the operator to point at a
+  specific file?) before any implementation starts. Not scoped or planned
+  yet - recorded here so it isn't lost.
