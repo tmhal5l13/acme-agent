@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     id      INTEGER PRIMARY KEY CHECK (id = 1),
     version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 5);
+INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 6);
 
 -- Observed state only, reported by spokes via checkin - which domains,
 -- which DNS provider, and renewal policy are desired state, tracked in
@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS spoke_cert_state (
     claimed_by            TEXT,
     claimed_at            TIMESTAMP,
     claim_expires_at      TIMESTAMP,
+    -- last_hook_at/last_hook_error (schema version 6) mirror
+    -- internal/store.CertState's identically-named/shaped columns on the
+    -- spoke side - the hub previously had no concept of reload hooks at
+    -- all, which meant a spoke whose reload_hook silently failed on every
+    -- renewal kept reporting (and this table kept showing) a fully
+    -- "active," healthy certificate indefinitely. Set by Store.MarkHookResult,
+    -- independent of status/last_error above (a hook failure must never be
+    -- confused with, or override, a renewal failure - see that method's own
+    -- doc comment).
+    last_hook_at          TIMESTAMP,
+    last_hook_error       TEXT,
     PRIMARY KEY (spoke_id, name)
 );
 

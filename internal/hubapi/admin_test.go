@@ -127,3 +127,59 @@ func TestHandleAdminDashboard_EscapesUntrustedFields(t *testing.T) {
 		t.Errorf("body missing the expected escaped form of the spoke-reported error:\n%s", body)
 	}
 }
+
+// TestHandleAdminDashboard_ShowsHookFailure proves a reload_hook failure
+// is actually visible on the dashboard - the whole point of surfacing it
+// on the hub at all, since before this it sat invisibly in the spoke's own
+// local database.
+func TestHandleAdminDashboard_ShowsHookFailure(t *testing.T) {
+	cfg := statusTestConfig()
+	s := newTestServer(t, cfg, statusTestSpokes(), nil)
+
+	notAfter := time.Now().Add(60 * 24 * time.Hour)
+	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), notAfter, "serial-a"); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+	if err := s.store.MarkHookResult("spoke-a", "cert-a", errors.New("fmsadmin certificate import failed")); err != nil {
+		t.Fatalf("seed hook result: %v", err)
+	}
+
+	resp := doBasicAuthRequest(s, "GET", "/admin", "status-token")
+	if resp.Code != 200 {
+		t.Fatalf("got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+
+	if !strings.Contains(body, "fmsadmin certificate import failed") {
+		t.Errorf("body missing the hook failure text:\n%s", body)
+	}
+}
+
+// TestHandleAdminDashboard_EscapesHookError is TestHandleAdminDashboard_EscapesUntrustedFields's
+// counterpart for the hook-error column - the same untrusted-text concern
+// applies here (a reload_hook's own output can contain anything), and it's
+// a newer field than LastError, not automatically covered by that test.
+func TestHandleAdminDashboard_EscapesHookError(t *testing.T) {
+	cfg := statusTestConfig()
+	s := newTestServer(t, cfg, statusTestSpokes(), nil)
+
+	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), time.Now().Add(60*24*time.Hour), "serial-a"); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+	if err := s.store.MarkHookResult("spoke-a", "cert-a", errors.New("<script>alert(1)</script>")); err != nil {
+		t.Fatalf("seed hook result: %v", err)
+	}
+
+	resp := doBasicAuthRequest(s, "GET", "/admin", "status-token")
+	if resp.Code != 200 {
+		t.Fatalf("got status %d, want 200, body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Errorf("body contains an unescaped <script> tag from a hook error - html/template should have escaped it:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("body missing the expected escaped form of the hook error:\n%s", body)
+	}
+}

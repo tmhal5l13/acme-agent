@@ -22,6 +22,8 @@ type CertState struct {
 	ClaimedBy           sql.NullString
 	ClaimedAt           sql.NullTime
 	ClaimExpiresAt      sql.NullTime
+	LastHookAt          sql.NullTime
+	LastHookError       sql.NullString
 }
 
 // CheckinActive records a spoke's report of a successful issuance or
@@ -104,19 +106,53 @@ func (s *Store) CheckinFailed(spokeID, name string, checkinErr error, consecutiv
 	return nil
 }
 
+// MarkHookResult records the outcome of a spoke's reload_hook for one of
+// its certificates, independent of that certificate's own status (see
+// internal/hook for why a hook failure must never be conflated with a
+// renewal failure - the same reasoning CheckinActive/CheckinFailed's own
+// split already rests on). Mirrors internal/store.Store's identically-named
+// method on the spoke side; this is the hub-side twin that makes a hook
+// failure visible fleet-wide (GET /v1/status, the admin dashboard) instead
+// of sitting invisibly in one spoke's own local database.
+//
+// Callers pass this whenever a checkin request carries hook status,
+// whether or not the same checkin also reports an "active"/"failed"
+// certificate status via CheckinActive/CheckinFailed - the two are
+// unrelated axes of the same row and this only ever touches its own two
+// columns.
+func (s *Store) MarkHookResult(spokeID, name string, hookErr error) error {
+	var errText sql.NullString
+	if hookErr != nil {
+		errText = sql.NullString{String: hookErr.Error(), Valid: true}
+	}
+	now := time.Now().UTC()
+
+	_, err := s.db.Exec(`
+		INSERT INTO spoke_cert_state (spoke_id, name, last_hook_at, last_hook_error)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (spoke_id, name) DO UPDATE SET
+			last_hook_at    = excluded.last_hook_at,
+			last_hook_error = excluded.last_hook_error`,
+		spokeID, name, now, errText)
+	if err != nil {
+		return fmt.Errorf("mark hook result for spoke=%q name=%q: %w", spokeID, name, err)
+	}
+	return nil
+}
+
 // Get returns the last-known state for spoke+name, or ErrNotFound if that
 // spoke has never checked in for this certificate — which callers should
 // treat as "due" (nothing has ever been issued).
 func (s *Store) Get(spokeID, name string) (*CertState, error) {
 	row := s.db.QueryRow(`
-		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at, claimed_by, claimed_at, claim_expires_at
+		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at, claimed_by, claimed_at, claim_expires_at, last_hook_at, last_hook_error
 		FROM spoke_cert_state WHERE spoke_id = ? AND name = ?`, spokeID, name)
 
 	var cs CertState
 	err := row.Scan(
 		&cs.SpokeID, &cs.Name, &cs.NotBefore, &cs.NotAfter, &cs.SerialNumber, &cs.Status,
 		&cs.LastCheckinAt, &cs.LastError, &cs.ConsecutiveFailures, &cs.LastSuccessAt,
-		&cs.ClaimedBy, &cs.ClaimedAt, &cs.ClaimExpiresAt,
+		&cs.ClaimedBy, &cs.ClaimedAt, &cs.ClaimExpiresAt, &cs.LastHookAt, &cs.LastHookError,
 	)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -135,7 +171,7 @@ func (s *Store) Get(spokeID, name string) (*CertState, error) {
 // cross-reference this against the hub's config.
 func (s *Store) All() ([]CertState, error) {
 	rows, err := s.db.Query(`
-		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at, claimed_by, claimed_at, claim_expires_at
+		SELECT spoke_id, name, not_before, not_after, serial_number, status, last_checkin_at, last_error, consecutive_failures, last_success_at, claimed_by, claimed_at, claim_expires_at, last_hook_at, last_hook_error
 		FROM spoke_cert_state`)
 	if err != nil {
 		return nil, fmt.Errorf("query all cert states: %w", err)
@@ -148,7 +184,7 @@ func (s *Store) All() ([]CertState, error) {
 		if err := rows.Scan(
 			&cs.SpokeID, &cs.Name, &cs.NotBefore, &cs.NotAfter, &cs.SerialNumber, &cs.Status,
 			&cs.LastCheckinAt, &cs.LastError, &cs.ConsecutiveFailures, &cs.LastSuccessAt,
-			&cs.ClaimedBy, &cs.ClaimedAt, &cs.ClaimExpiresAt,
+			&cs.ClaimedBy, &cs.ClaimedAt, &cs.ClaimExpiresAt, &cs.LastHookAt, &cs.LastHookError,
 		); err != nil {
 			return nil, fmt.Errorf("scan cert state row: %w", err)
 		}

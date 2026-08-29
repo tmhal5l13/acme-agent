@@ -77,7 +77,7 @@ const adminTemplateSrc = `<!doctype html>
   <section>
     <h2>Certificate status</h2>
     <table>
-      <tr><th>Spoke</th><th>Cert</th><th>Status</th><th>Not After</th><th>Last Checkin</th><th>Failures</th><th>Last Error</th></tr>
+      <tr><th>Spoke</th><th>Cert</th><th>Status</th><th>Not After</th><th>Last Checkin</th><th>Failures</th><th>Last Error</th><th>Hook</th></tr>
       {{range .Entries}}
       <tr class="status-{{.Status}}">
         <td>{{.SpokeID}}</td>
@@ -87,6 +87,7 @@ const adminTemplateSrc = `<!doctype html>
         <td>{{.LastCheckinAt}}</td>
         <td>{{.ConsecutiveFailures}}</td>
         <td>{{.LastError}}</td>
+        <td{{if .LastHookError}} class="status-failed"{{end}}>{{.LastHookError}}</td>
       </tr>
       {{end}}
     </table>

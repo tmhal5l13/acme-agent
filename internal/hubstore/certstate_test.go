@@ -299,3 +299,82 @@ func TestClaim_ConcurrentCallersOnlyOneSucceeds(t *testing.T) {
 		t.Errorf("got %d successful claims out of %d concurrent attempts, want exactly 1", successes, attempts)
 	}
 }
+
+// TestMarkHookResult_RecordsIndependentlyOfCheckinStatus proves the actual
+// point of splitting this from CheckinActive/CheckinFailed: a hook result
+// can be recorded without disturbing whatever certificate status/error is
+// already on the row, and vice versa - the two are unrelated axes of the
+// same row, matching CheckinActive/CheckinFailed's own established split
+// between certificate fields and failure-streak fields.
+func TestMarkHookResult_RecordsIndependentlyOfCheckinStatus(t *testing.T) {
+	st := openTestStore(t)
+	notBefore := time.Now()
+	notAfter := notBefore.Add(90 * 24 * time.Hour)
+
+	if err := st.CheckinActive("spoke-a", "cert-a", notBefore, notAfter, "serial-1"); err != nil {
+		t.Fatalf("CheckinActive: %v", err)
+	}
+
+	if err := st.MarkHookResult("spoke-a", "cert-a", errors.New("systemctl reload nginx: exit status 1")); err != nil {
+		t.Fatalf("MarkHookResult: %v", err)
+	}
+
+	cs, err := st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The hook failed, but the certificate itself is still active - status
+	// must not have flipped to "failed" just because the hook did.
+	if cs.Status != "active" {
+		t.Errorf("got status %q after a failed hook on an otherwise-successful checkin, want %q (unchanged)", cs.Status, "active")
+	}
+	if !cs.SerialNumber.Valid || cs.SerialNumber.String != "serial-1" {
+		t.Errorf("got serial %v after MarkHookResult, want unchanged %q", cs.SerialNumber, "serial-1")
+	}
+	if !cs.LastHookAt.Valid {
+		t.Error("last_hook_at is not set after MarkHookResult")
+	}
+	if !cs.LastHookError.Valid || cs.LastHookError.String != "systemctl reload nginx: exit status 1" {
+		t.Errorf("got last_hook_error %v, want the recorded hook error", cs.LastHookError)
+	}
+
+	// A subsequent successful hook run must clear the error without
+	// touching the certificate fields either.
+	if err := st.MarkHookResult("spoke-a", "cert-a", nil); err != nil {
+		t.Fatalf("MarkHookResult (success): %v", err)
+	}
+	cs, err = st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get after second MarkHookResult: %v", err)
+	}
+	if cs.LastHookError.Valid {
+		t.Errorf("got last_hook_error %v after a successful hook run, want unset", cs.LastHookError)
+	}
+	if !cs.SerialNumber.Valid || cs.SerialNumber.String != "serial-1" {
+		t.Errorf("got serial %v after a second MarkHookResult, want unchanged %q", cs.SerialNumber, "serial-1")
+	}
+}
+
+// TestMarkHookResult_WorksBeforeAnyCheckin proves MarkHookResult's own
+// INSERT ... ON CONFLICT works standalone, the same defensive shape
+// CheckinActive/CheckinFailed/Claim already establish, even though in
+// practice handleCheckin always calls CheckinActive/CheckinFailed first
+// for the same request.
+func TestMarkHookResult_WorksBeforeAnyCheckin(t *testing.T) {
+	st := openTestStore(t)
+
+	if err := st.MarkHookResult("spoke-a", "cert-a", errors.New("boom")); err != nil {
+		t.Fatalf("MarkHookResult with no prior row: %v", err)
+	}
+
+	cs, err := st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if cs.Status != "unknown" {
+		t.Errorf("got status %q for a row created only by MarkHookResult, want %q", cs.Status, "unknown")
+	}
+	if !cs.LastHookError.Valid || cs.LastHookError.String != "boom" {
+		t.Errorf("got last_hook_error %v, want %q", cs.LastHookError, "boom")
+	}
+}

@@ -233,6 +233,80 @@ func TestCheckin_FailedStatusDoesNotRequireCertFields(t *testing.T) {
 	}
 }
 
+// TestCheckin_RecordsHookStatus proves a checkin carrying HookStatus
+// actually reaches hubstore.Store.MarkHookResult, independent of the
+// checkin's own certificate status - the end-to-end version of
+// TestMarkHookResult_RecordsIndependentlyOfCheckinStatus, through the real
+// HTTP endpoint rather than against the storage layer directly.
+func TestCheckin_RecordsHookStatus(t *testing.T) {
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
+
+	notAfter := time.Now().Add(60 * 24 * time.Hour).UTC()
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: time.Now().UTC(), NotAfter: notAfter,
+		Serial: "abc123", Status: "active",
+		HookStatus: "failed", HookError: "systemctl reload nginx: exit status 1", HookAt: time.Now().UTC(),
+	})
+
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 204 {
+		t.Fatalf("got status %d, want 204, body=%s", resp.Code, resp.Body.String())
+	}
+
+	state, err := s.store.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if state.Status != "active" {
+		t.Errorf("got status %q, want %q (hook failure must not affect certificate status)", state.Status, "active")
+	}
+	if !state.LastHookAt.Valid {
+		t.Error("last_hook_at is not set after a checkin carrying hook_status")
+	}
+	if !state.LastHookError.Valid || state.LastHookError.String != "systemctl reload nginx: exit status 1" {
+		t.Errorf("got last_hook_error %v, want the reported hook error", state.LastHookError)
+	}
+}
+
+// TestCheckin_NoHookStatusLeavesHookFieldsUnset proves a checkin that
+// doesn't report a hook result at all (the common case - see
+// checkinRequest.HookStatus's own doc comment) doesn't call
+// MarkHookResult, leaving the row's hook columns untouched rather than
+// stamping a misleading "hook ran and succeeded" outcome that never
+// actually happened.
+func TestCheckin_NoHookStatusLeavesHookFieldsUnset(t *testing.T) {
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
+
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: time.Now().UTC(), NotAfter: time.Now().Add(60 * 24 * time.Hour).UTC(),
+		Serial: "abc123", Status: "active",
+	})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 204 {
+		t.Fatalf("got status %d, want 204, body=%s", resp.Code, resp.Body.String())
+	}
+
+	state, err := s.store.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if state.LastHookAt.Valid {
+		t.Errorf("got last_hook_at %v after a checkin with no hook_status, want unset", state.LastHookAt)
+	}
+}
+
+func TestCheckin_UnknownHookStatusRejected(t *testing.T) {
+	s := newTestServer(t, testConfig(), testSpokes(), nil)
+	body, _ := json.Marshal(checkinRequest{
+		Domains: []string{"example.com"}, NotBefore: time.Now(), NotAfter: time.Now().Add(60 * 24 * time.Hour),
+		Serial: "abc123", Status: "active", HookStatus: "banana",
+	})
+	resp := doRequest(s, "POST", "/v1/certs/cert-a/checkin", "token-a", body)
+	if resp.Code != 400 {
+		t.Fatalf("got status %d, want 400 for an unrecognized hook_status value", resp.Code)
+	}
+}
+
 func TestDue_NeverCheckedIn(t *testing.T) {
 	s := newTestServer(t, testConfig(), testSpokes(), nil)
 	resp := doRequest(s, "GET", "/v1/certs/cert-a/due", "token-a", nil)
