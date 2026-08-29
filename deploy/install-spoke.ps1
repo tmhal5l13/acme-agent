@@ -54,7 +54,9 @@ $binPath = "`"$BinaryPath`" --config `"$ConfigPath`""
 # created automatically the first time a service of this name references
 # it) and grant that account only the specific rights reload_hook needs
 # (e.g. via sc.exe sdset on the target service's own security descriptor) -
-# analogous to the sudoers rule's role on Linux. That's a per-deployment
+# analogous to the sudoers rule's role on Linux. See
+# acme-spoke-service-rights.example.ps1 for exactly how to do this against
+# one target service (e.g. FileMaker Server). That's a per-deployment
 # decision this script doesn't make for you.
 New-Service -Name $ServiceName `
     -BinaryPathName $binPath `

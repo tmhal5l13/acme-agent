@@ -268,7 +268,15 @@ service account (`NT SERVICE\acme-spoke`) and grant that account only what
 `reload_hook` actually requires instead — a per-deployment decision the
 install script deliberately doesn't make for you, the same way
 `acme-spoke.sudoers.example` is provided rather than force-installed on
-Linux.
+Linux. `acme-spoke-service-rights.example.ps1` is that Windows analogue:
+switches the service onto its virtual account, resolves that account's
+SID (`sc.exe showsid`), and appends exactly one `SERVICE_START`/
+`SERVICE_STOP` ACE to one named target service's *existing* security
+descriptor (`sc.exe sdshow`/`sdset` — read-then-append, never a blind
+overwrite, the same "narrow, additive, nothing forgotten" spirit as the
+sudoers file) — enough for a `reload_hook` like
+`net stop "FileMaker Server" && net start "FileMaker Server"` to work
+without the service ever running as `LocalSystem`.
 
 ## Database-backed desired state
 
@@ -1386,12 +1394,23 @@ The manual rotation procedure:
   v3 API entirely (different endpoint paths and response shapes, not just
   a different auth header) — real provider work upstream, not a config
   change here.
-- **`reload_hook` and `notify_hook` are both unit-tested only.** Neither
-  has been exercised against a real consuming service or a real firing in
-  a live deployment. `notify_hook`'s transition-detection logic has run
-  for real (a genuine "failed" checkin occurred during development), but
-  no hook was configured at the time to confirm the actual invocation
-  path.
+- **`reload_hook` and `notify_hook` are both unit-tested only, not exercised
+  against a real consuming service in a live deployment.** This is
+  narrower than it used to be: a failed hook is no longer invisible (see
+  "Hook status visibility" above), a per-cert timeout exists for hooks
+  that legitimately run long (a full service restart, not just a reload),
+  a failed hook gets retried on its own without waiting for the next
+  renewal, `--test-hook` lets a hook command be verified without a real
+  renewal at all, and Windows has a documented, narrow way to delegate
+  control of a specific target service (`acme-spoke-service-rights.example.ps1`)
+  without running as `LocalSystem`. What's still genuinely unverified: a
+  real multi-step hook (e.g. `fmsadmin` certificate import followed by a
+  full service restart) actually firing against a real installation of
+  that service, start to finish, in a live deployment — this project's own
+  development has only ever run `reload_hook` against simple, fast
+  commands. `notify_hook`'s transition-detection logic has run for real (a
+  genuine "failed" checkin occurred during development), but no hook was
+  configured at the time to confirm the actual invocation path.
 - **Self-reported checkin fields aren't cryptographically verified.**
   `handleCheckin` trusts `not_before`/`not_after`/`serial` exactly as a
   spoke reports them — the hub has no independent way to confirm they
