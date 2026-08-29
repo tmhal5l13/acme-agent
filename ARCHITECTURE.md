@@ -881,6 +881,34 @@ both surfaces get this for free) exposes it as `last_hook_at`/
 `last_hook_error`; the dashboard renders a `Hook` column, highlighted
 the same way a failed certificate status already is.
 
+Visibility alone doesn't fix anything, so two more pieces close the loop:
+
+- **`spokeagent.Agent.retryHookIfFailed`** retries a cert's hook on its own
+  — no ACME order, no new issuance — on every poll cycle where the cert
+  isn't due for renewal but its last recorded hook run failed. Without
+  this, a broken `reload_hook` (a typo, a permissions problem, the wrong
+  `fmsadmin` flags) would only ever be retried on the certificate's next
+  natural renewal, weeks to months away, even though the fix might be a
+  one-line config edit away right now. Deliberately has no backoff of its
+  own — `poll_interval` (15m by default) is already the throttle, and a
+  broken hook is worth retrying every cycle until it's fixed, not worth a
+  separate schedule.
+- **`SpokeLocalCertConfig.HookTimeout`** overrides `SpokeConfig.HookTimeout`
+  for one certificate, zero meaning "use the spoke-wide default" (the same
+  convention the hub's own per-cert `RenewBefore` override already uses).
+  Exists because a `reload_hook` isn't always a quick reload — some
+  services (FileMaker Server is a real example: `fmsadmin` has to import
+  the new certificate, then the service needs a full restart, not just a
+  reload) legitimately take much longer than a typical `systemctl reload`,
+  and the old global-only timeout meant raising it for every certificate
+  on a spoke just to accommodate the one slow one.
+- **`acme-spoke --test-hook <cert-name>`** runs exactly that certificate's
+  `reload_hook` (with its resolved timeout) against whatever's currently
+  installed and exits — no store, no hub, no ACME involved at all. Without
+  it, the first sign of a wrong hook command was a real renewal, whenever
+  that next happened to be. Its exit code reflects the hook's own result,
+  so it's scriptable (e.g. a pre-deployment check).
+
 ## End-to-end testing with Pebble
 
 `internal/acmeclient/pebble_test.go` and `internal/hubapi/pebble_test.go`
