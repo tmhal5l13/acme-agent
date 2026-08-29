@@ -368,6 +368,130 @@ func TestOpen_MigratesV4ToV5(t *testing.T) {
 	}
 }
 
+// oldV5Schema is exactly what schema.sql looked like before
+// last_hook_at/last_hook_error were added to spoke_cert_state.
+const oldV5Schema = `
+CREATE TABLE schema_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL
+);
+INSERT INTO schema_meta (id, version) VALUES (1, 5);
+
+CREATE TABLE spoke_cert_state (
+    spoke_id              TEXT NOT NULL,
+    name                  TEXT NOT NULL,
+    not_before            TIMESTAMP,
+    not_after             TIMESTAMP,
+    serial_number         TEXT,
+    status                TEXT NOT NULL DEFAULT 'unknown'
+                              CHECK (status IN ('unknown', 'active', 'failed')),
+    last_checkin_at       TIMESTAMP,
+    last_error            TEXT,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    last_success_at       TIMESTAMP,
+    claimed_by            TEXT,
+    claimed_at            TIMESTAMP,
+    claim_expires_at      TIMESTAMP,
+    PRIMARY KEY (spoke_id, name)
+);
+
+CREATE TABLE enrollment_tokens (
+    secret        TEXT PRIMARY KEY,
+    spoke_id      TEXT NOT NULL,
+    bearer_token  TEXT NOT NULL,
+    created_at    TIMESTAMP NOT NULL,
+    expires_at    TIMESTAMP NOT NULL,
+    redeemed_at   TIMESTAMP
+);
+
+CREATE TABLE spokes (
+    id         TEXT PRIMARY KEY,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE spoke_tokens (
+    token      TEXT PRIMARY KEY,
+    spoke_id   TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE spoke_certs (
+    spoke_id                  TEXT NOT NULL,
+    name                      TEXT NOT NULL,
+    domains_json              TEXT NOT NULL,
+    dns_provider              TEXT NOT NULL,
+    domain_dns_providers_json TEXT NOT NULL DEFAULT '{}',
+    renew_before_ns           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (spoke_id, name)
+);
+
+CREATE TABLE dns_providers (
+    name        TEXT PRIMARY KEY,
+    config_json TEXT NOT NULL
+);
+`
+
+// TestOpen_MigratesV5ToV6 proves Open brings a v5 database up to date with
+// the last_hook_at/last_hook_error columns added for schema version 6,
+// without losing whatever it already held, and that both the new columns
+// and MarkHookResult actually work against the migrated database
+// afterward.
+func TestOpen_MigratesV5ToV6(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v5.db")
+
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	if _, err := seed.Exec(oldV5Schema); err != nil {
+		t.Fatalf("create v5 schema: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO spoke_cert_state (spoke_id, name, status, serial_number) VALUES ('spoke-a', 'cert-a', 'active', 'pre-migration-serial')`,
+	); err != nil {
+		t.Fatalf("seed pre-migration row: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed connection: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v5 database: %v", err)
+	}
+	defer st.Close()
+
+	var version int
+	if err := st.db.QueryRow(`SELECT version FROM schema_meta WHERE id = 1`).Scan(&version); err != nil {
+		t.Fatalf("read schema version after migration: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Errorf("got schema version %d after migration, want %d", version, currentSchemaVersion)
+	}
+
+	cs, err := st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get pre-migration row after migration: %v", err)
+	}
+	if cs.SerialNumber.String != "pre-migration-serial" {
+		t.Errorf("pre-migration data lost: got serial %q, want pre-migration-serial", cs.SerialNumber.String)
+	}
+	if cs.LastHookAt.Valid {
+		t.Errorf("got LastHookAt valid on a freshly-migrated row, want unset (NULL)")
+	}
+
+	if err := st.MarkHookResult("spoke-a", "cert-a", fmt.Errorf("reload nginx: exit status 1")); err != nil {
+		t.Fatalf("MarkHookResult against a migrated database: %v", err)
+	}
+	cs, err = st.Get("spoke-a", "cert-a")
+	if err != nil {
+		t.Fatalf("Get after MarkHookResult: %v", err)
+	}
+	if !cs.LastHookAt.Valid || cs.LastHookError.String != "reload nginx: exit status 1" {
+		t.Errorf("got LastHookAt=%v LastHookError=%q, want a set timestamp and the recorded error", cs.LastHookAt, cs.LastHookError.String)
+	}
+}
+
 // TestOpen_IdempotentOnCurrentDatabase proves migrate is safe to run every
 // process start, including against a database already at the current
 // version - not just once, on first upgrade.

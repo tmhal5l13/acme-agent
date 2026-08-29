@@ -852,6 +852,35 @@ remember to run — `internal/hubstore`'s tests cover both the upgrade path
 (a hand-built pre-migration database survives with its data intact) and the
 idempotent path (reopening an already-current database).
 
+### Hook status visibility
+
+`spoke_cert_state` also carries `last_hook_at`/`last_hook_error` (schema
+version 6), mirroring `internal/store.CertState`'s identically-shaped
+columns on the spoke side. Before these existed, a `reload_hook`'s outcome
+was recorded *only* in the spoke's own local database — the hub had no
+concept of reload hooks at all, so a hook silently failing on every single
+renewal left the certificate showing `"active"` here, on the admin
+dashboard, and on `GET /v1/status`, indefinitely. There was no way to tell
+"renewed and the consuming service actually picked it up" from "renewed,
+but the service never reloaded" without logging into that specific spoke.
+
+`hubstore.Store.MarkHookResult(spokeID, name, hookErr)` records this,
+deliberately independent of `CheckinActive`/`CheckinFailed` — a hook
+failure must never be conflated with (or override) a renewal failure, the
+same reasoning that already separates certificate fields from
+failure-streak fields in those two methods. `checkinRequest` carries three
+optional fields for this — `hook_status` (`"ok"`/`"failed"`), `hook_error`,
+`hook_at` — populated only when a checkin is actually reporting a hook
+result (most aren't: a cert with no `reload_hook` configured never has one
+to report, and the checkin reporting a fresh issuance doesn't either — see
+"Certificate installation" above and `spokeagent.reportHookResult`, a
+second, separate checkin sent once the hook has actually finished running,
+so a slow hook never delays the hub learning about a successful renewal).
+`adminEntries` (shared by `GET /v1/status` and the HTML dashboard, so
+both surfaces get this for free) exposes it as `last_hook_at`/
+`last_hook_error`; the dashboard renders a `Hook` column, highlighted
+the same way a failed certificate status already is.
+
 ## End-to-end testing with Pebble
 
 `internal/acmeclient/pebble_test.go` and `internal/hubapi/pebble_test.go`

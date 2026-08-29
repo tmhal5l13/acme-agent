@@ -40,7 +40,7 @@ type Store struct {
 // seeds a brand-new database with. Existing databases are brought up to it
 // by migrate, since CREATE TABLE IF NOT EXISTS (schema.sql's only tool) does
 // nothing for a table that already exists in an older shape.
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 // Open opens (creating if necessary) the SQLite database at path, applies
 // the schema, and migrates an existing database up to currentSchemaVersion
@@ -161,6 +161,18 @@ func migrate(db *sql.DB) error {
 		// consistent with every other version bump.
 		if _, err := db.Exec(`UPDATE schema_meta SET version = 5 WHERE id = 1`); err != nil {
 			return fmt.Errorf("record schema version 5: %w", err)
+		}
+	}
+
+	if version < 6 {
+		if _, err := db.Exec(`
+			ALTER TABLE spoke_cert_state ADD COLUMN last_hook_at TIMESTAMP;
+			ALTER TABLE spoke_cert_state ADD COLUMN last_hook_error TEXT;
+		`); err != nil {
+			return fmt.Errorf("add last_hook_at/last_hook_error columns (v5 -> v6): %w", err)
+		}
+		if _, err := db.Exec(`UPDATE schema_meta SET version = 6 WHERE id = 1`); err != nil {
+			return fmt.Errorf("record schema version 6: %w", err)
 		}
 	}
 

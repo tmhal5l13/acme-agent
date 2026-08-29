@@ -26,6 +26,19 @@ type checkinRequest struct {
 	// the hub can distinguish a cert's first hiccup from its fifteenth
 	// consecutive failure, which "status: failed" alone can't.
 	ConsecutiveFailures int `json:"consecutive_failures"`
+	// HookStatus/HookError/HookAt report a reload_hook's own outcome,
+	// entirely independent of Status above (a hook failure must never be
+	// conflated with a renewal failure - see internal/hook). Omitted
+	// entirely by a spoke's cert that has no reload_hook configured, or on
+	// a checkin that isn't reporting a hook result at all (this field set
+	// is only ever populated by spokeagent.reportHookResult, a second,
+	// separate checkin from the one reporting Status). Before this field
+	// existed, a spoke's hook outcome was recorded only in its own local
+	// database - invisible to the hub, and therefore to the admin
+	// dashboard and GET /v1/status, indefinitely.
+	HookStatus string    `json:"hook_status,omitempty"` // "ok" or "failed"
+	HookError  string    `json:"hook_error,omitempty"`
+	HookAt     time.Time `json:"hook_at,omitempty"`
 }
 
 // maxPlausibleCertLifetime is a generous, not tight, upper bound on
@@ -79,6 +92,9 @@ func (r checkinRequest) validate() error {
 			return fmt.Errorf("not_after is %s after not_before, longer than any plausible certificate lifetime (%s)",
 				r.NotAfter.Sub(r.NotBefore), maxPlausibleCertLifetime)
 		}
+	}
+	if r.HookStatus != "" && r.HookStatus != "ok" && r.HookStatus != "failed" {
+		return fmt.Errorf("hook_status must be %q or %q, got %q", "ok", "failed", r.HookStatus)
 	}
 	return nil
 }
@@ -136,6 +152,25 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		slog.Error("checkin", "spoke", spokeID, "name", cert.Name, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	// HookStatus is entirely independent of req.Status above (see the
+	// field's own doc comment) - recorded separately, and only when a
+	// checkin actually carries a hook result at all. Most checkins don't:
+	// the one reporting a fresh issuance/renewal never does (see
+	// spokeagent.ProcessCert, which reports the hook's outcome via a
+	// second, separate checkin once the hook has actually run), and a
+	// cert with no reload_hook configured never has one to report.
+	if req.HookStatus != "" {
+		var hookErr error
+		if req.HookStatus == "failed" {
+			hookErr = errors.New(req.HookError)
+		}
+		if err := s.store.MarkHookResult(spokeID, cert.Name, hookErr); err != nil {
+			slog.Error("checkin: record hook result", "spoke", spokeID, "name", cert.Name, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// req.NotAfter is only meaningful on an "active" checkin — a "failed"

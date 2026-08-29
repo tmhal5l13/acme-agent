@@ -25,6 +25,8 @@ type statusEntry struct {
 	LastSuccessAt       time.Time `json:"last_success_at,omitempty"`
 	LastError           string    `json:"last_error,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
+	LastHookAt          time.Time `json:"last_hook_at,omitempty"`
+	LastHookError       string    `json:"last_hook_error,omitempty"`
 }
 
 // handleStatus answers a read-only, fleet-wide view of every configured
@@ -96,6 +98,8 @@ func (s *Server) adminEntries(state *hubState) ([]statusEntry, error) {
 				LastSuccessAt:       cs.LastSuccessAt.Time,
 				LastError:           cs.LastError.String,
 				ConsecutiveFailures: cs.ConsecutiveFailures,
+				LastHookAt:          cs.LastHookAt.Time,
+				LastHookError:       cs.LastHookError.String,
 			})
 		}
 	}

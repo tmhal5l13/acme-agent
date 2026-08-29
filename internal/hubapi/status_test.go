@@ -2,6 +2,7 @@ package hubapi
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -129,6 +130,48 @@ func TestHandleStatus_ReflectsFailureStreak(t *testing.T) {
 			}
 			if e.Status != "failed" {
 				t.Errorf("got status %q, want failed", e.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("spoke-a/cert-a missing from response")
+	}
+}
+
+// TestHandleStatus_ReflectsHookFailure is the actual point of surfacing
+// hook status on GET /v1/status at all: a reload_hook failure must be
+// visible fleet-wide, not just in one spoke's own local database - before
+// this, a cert here would show "active" with no indication its reload
+// hook had been silently failing.
+func TestHandleStatus_ReflectsHookFailure(t *testing.T) {
+	s := newTestServer(t, statusTestConfig(), statusTestSpokes(), nil)
+
+	notAfter := time.Now().Add(60 * 24 * time.Hour)
+	if err := s.store.CheckinActive("spoke-a", "cert-a", time.Now(), notAfter, "serial-a"); err != nil {
+		t.Fatalf("seed checkin: %v", err)
+	}
+	if err := s.store.MarkHookResult("spoke-a", "cert-a", errors.New("fmsadmin certificate import failed")); err != nil {
+		t.Fatalf("seed hook result: %v", err)
+	}
+
+	resp := doRequest(s, "GET", "/v1/status", "status-token", nil)
+	var entries []statusEntry
+	if err := json.Unmarshal(resp.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	var found bool
+	for _, e := range entries {
+		if e.SpokeID == "spoke-a" && e.Name == "cert-a" {
+			found = true
+			if e.Status != "active" {
+				t.Errorf("got status %q, want %q (a hook failure must not affect certificate status)", e.Status, "active")
+			}
+			if e.LastHookError != "fmsadmin certificate import failed" {
+				t.Errorf("got last_hook_error %q, want the recorded hook error", e.LastHookError)
+			}
+			if e.LastHookAt.IsZero() {
+				t.Error("got zero last_hook_at, want it set")
 			}
 		}
 	}

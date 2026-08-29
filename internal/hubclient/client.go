@@ -137,6 +137,14 @@ type CheckinRequest struct {
 	// internal/store.CertState.ConsecutiveFailures), so the hub can tell a
 	// cert's first failed attempt from its fifteenth.
 	ConsecutiveFailures int `json:"consecutive_failures"`
+	// HookStatus/HookError/HookAt report a reload_hook's own outcome,
+	// independent of Status above - see internal/hubapi's identically-shaped
+	// checkinRequest for the full reasoning. Left zero-valued (and thus
+	// omitted on the wire) for a checkin that isn't reporting a hook
+	// result - most aren't.
+	HookStatus string    `json:"hook_status,omitempty"` // "ok" or "failed"
+	HookError  string    `json:"hook_error,omitempty"`
+	HookAt     time.Time `json:"hook_at,omitempty"`
 }
 
 // Checkin reports req to the hub for certName.
