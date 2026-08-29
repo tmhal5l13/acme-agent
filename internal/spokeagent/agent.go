@@ -101,10 +101,85 @@ func (a *Agent) processIfDue(ctx context.Context, cert config.SpokeLocalCertConf
 		return fmt.Errorf("check due with hub: %w", err)
 	}
 	if !due {
+		// Not due for renewal doesn't mean nothing to do: if the last
+		// reload_hook run for this cert failed, retry just the hook (not
+		// the ACME flow) on every poll cycle until it succeeds - poll_interval
+		// itself is the retry throttle, deliberately not a separate backoff
+		// (see retryHookIfFailed's own doc comment).
+		a.retryHookIfFailed(ctx, cert, cs)
 		return nil
 	}
 
 	return a.ProcessCert(ctx, cert)
+}
+
+// retryHookIfFailed retries cert's reload_hook, on its own, against
+// whatever's already installed - used when the certificate itself isn't
+// due for renewal but its last recorded hook run failed. Without this, a
+// broken reload_hook (wrong fmsadmin command, a typo, a permissions
+// problem) would only ever be retried on the certificate's next natural
+// renewal - weeks to months away - even though the fix might be a
+// one-line config edit away right now. No separate backoff: poll_interval
+// (15m by default) is already the throttle, and a broken hook is worth
+// retrying every cycle until it's fixed, not worth its own schedule.
+// cs is the caller's already-loaded local state, reused rather than
+// re-read, since processIfDue already paid for it.
+func (a *Agent) retryHookIfFailed(ctx context.Context, cert config.SpokeLocalCertConfig, cs *store.CertState) {
+	if cert.ReloadHook == "" || !cs.LastHookError.Valid {
+		return
+	}
+
+	hookErr := hook.Run(ctx, cert.ReloadHook, a.hookTimeoutFor(cert))
+	if err := a.st.MarkHookResult(cert.Name, hookErr); err != nil {
+		slog.Error("record hook retry result", "name", cert.Name, "error", err)
+	}
+	a.reportHookResult(ctx, cert, cs.NotBefore.Time, cs.NotAfter.Time, cs.SerialNumber.String, hookErr)
+}
+
+// hookTimeoutFor resolves cert's own hook_timeout override if set, falling
+// back to the spoke-wide default - the same zero-means-default convention
+// config.SpokeLocalCertConfig.HookTimeout's own doc comment describes.
+func (a *Agent) hookTimeoutFor(cert config.SpokeLocalCertConfig) time.Duration {
+	if cert.HookTimeout != 0 {
+		return cert.HookTimeout.Duration()
+	}
+	return a.cfg.HookTimeout.Duration()
+}
+
+// reportHookResult tells the hub about a reload_hook's outcome via a
+// second, separate checkin from the one (if any) that reported the
+// certificate's own active/failed status - see hubclient.CheckinRequest's
+// HookStatus field for why this is a second call rather than folded into
+// the first: moving the existing post-issuance checkin to after hook.Run
+// would delay the hub learning about a successful renewal by however long
+// a slow hook takes, a real behavior change not worth making silently.
+// notBefore/notAfter/serial are the certificate's already-known validity
+// window - this call never describes a new certificate, whether it
+// follows a fresh issuance (ProcessCert, using the just-issued
+// certificate's own fields) or a standalone retry (retryHookIfFailed,
+// using cs's already-recorded fields, since nothing about the certificate
+// itself has changed). No-ops entirely if cert has no reload_hook
+// configured - nothing to report. Best-effort, like every other checkin
+// call in this file: a failed report just means the hub's view stays
+// stale until the next one.
+func (a *Agent) reportHookResult(ctx context.Context, cert config.SpokeLocalCertConfig, notBefore, notAfter time.Time, serial string, hookErr error) {
+	if cert.ReloadHook == "" {
+		return
+	}
+
+	req := hubclient.CheckinRequest{
+		Domains: cert.Domains, Status: "active",
+		NotBefore: notBefore, NotAfter: notAfter, Serial: serial,
+		HookStatus: "ok", HookAt: time.Now().UTC(),
+	}
+	if hookErr != nil {
+		req.HookStatus = "failed"
+		req.HookError = hookErr.Error()
+	}
+
+	if err := a.checkin(ctx, cert.Name, req); err != nil {
+		slog.Error("report hook result to hub", "name", cert.Name, "error", err)
+	}
 }
 
 // checkDue asks the hub whether certName is due, bounded by the
@@ -191,12 +266,15 @@ func (a *Agent) ProcessCert(ctx context.Context, cert config.SpokeLocalCertConfi
 	slog.Info("issued certificate", "name", cert.Name, "domains", cert.Domains, "not_after", notAfter, "dir", certDir)
 
 	// Hook failure is intentionally not treated as a certificate failure —
-	// see internal/hook for why. Its outcome is recorded separately, and
-	// purely locally (the hub has no notion of reload hooks at all).
-	hookErr := hook.Run(ctx, cert.ReloadHook, a.cfg.HookTimeout.Duration())
+	// see internal/hook for why. Its outcome is recorded locally
+	// (MarkHookResult) and reported to the hub (reportHookResult) as a
+	// second, separate checkin - see that method's doc comment for why a
+	// second call, not folding this into the checkin above.
+	hookErr := hook.Run(ctx, cert.ReloadHook, a.hookTimeoutFor(cert))
 	if err := a.st.MarkHookResult(cert.Name, hookErr); err != nil {
 		slog.Error("record hook result", "name", cert.Name, "error", err)
 	}
+	a.reportHookResult(ctx, cert, notBefore, notAfter, serial, hookErr)
 
 	return nil
 }

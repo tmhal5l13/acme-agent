@@ -67,3 +67,22 @@ certs:
   - name: radius-cert # must match this cert's name in the hub's spokes.<this-spoke>.certs config
     domains: [radius.example.com]
     reload_hook: "systemctl restart freeradius"
+
+  # reload_hook isn't limited to a single command - it's the whole string
+  # handed to sh -c (or cmd.exe /C on Windows), so a multi-step sequence
+  # works exactly as you'd run it by hand. Some services genuinely need
+  # this: FileMaker Server, for example, requires running fmsadmin to
+  # import the new certificate before restarting the service - a plain
+  # "restart" alone does nothing without that import step first.
+  # - name: filemaker-cert
+  #   domains: [filemaker.example.com]
+  #   reload_hook: >-
+  #     fmsadmin certificate import /var/lib/acme-spoke/certs/filemaker-cert/current/fullchain.pem
+  #     --keyfile /var/lib/acme-spoke/certs/filemaker-cert/current/privkey.pem -y &&
+  #     systemctl restart fmshelperd
+  #   # hook_timeout overrides the spoke-wide default above for this cert
+  #   # alone - a full service restart like this one can easily take
+  #   # longer than a plain "reload" elsewhere on the same spoke, and
+  #   # raising the global default just for this one cert would be
+  #   # unnecessarily generous for every other reload_hook this spoke runs.
+  #   hook_timeout: 2m

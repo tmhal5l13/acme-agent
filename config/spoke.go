@@ -48,6 +48,14 @@ type SpokeLocalCertConfig struct {
 	Name       string   `yaml:"name"`
 	Domains    []string `yaml:"domains"`
 	ReloadHook string   `yaml:"reload_hook"`
+	// HookTimeout overrides SpokeConfig.HookTimeout for this certificate
+	// alone; zero means "use the spoke-wide default" - the same
+	// zero-means-default convention the hub's own per-cert RenewBefore
+	// override already uses (see internal/hubapi's handleDue). Exists
+	// because one slow reload_hook (a full service restart, not just a
+	// reload) shouldn't force raising the timeout for every other
+	// certificate on the same spoke.
+	HookTimeout Duration `yaml:"hook_timeout"`
 }
 
 const (
