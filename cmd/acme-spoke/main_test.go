@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,5 +252,85 @@ func TestRunLoadToken_InvalidTokenErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected an error decoding a garbage token, got nil")
+	}
+}
+
+func TestRunTestHook_RunsConfiguredHookAndSucceeds(t *testing.T) {
+	cfg := &config.SpokeConfig{
+		HookTimeout: config.Duration(5 * time.Second),
+		Certs: []config.SpokeLocalCertConfig{
+			{Name: "test-cert", Domains: []string{"example.com"}, ReloadHook: "exit 0"},
+		},
+	}
+	if err := runTestHook(cfg, "test-cert"); err != nil {
+		t.Fatalf("runTestHook: %v", err)
+	}
+}
+
+func TestRunTestHook_ReportsHookFailure(t *testing.T) {
+	cfg := &config.SpokeConfig{
+		HookTimeout: config.Duration(5 * time.Second),
+		Certs: []config.SpokeLocalCertConfig{
+			{Name: "test-cert", Domains: []string{"example.com"}, ReloadHook: "exit 1"},
+		},
+	}
+	if err := runTestHook(cfg, "test-cert"); err == nil {
+		t.Fatal("expected an error for a failing reload_hook, got nil")
+	}
+}
+
+func TestRunTestHook_UnknownCertNameErrors(t *testing.T) {
+	cfg := &config.SpokeConfig{
+		Certs: []config.SpokeLocalCertConfig{
+			{Name: "test-cert", Domains: []string{"example.com"}, ReloadHook: "exit 0"},
+		},
+	}
+	err := runTestHook(cfg, "not-a-configured-cert")
+	if err == nil {
+		t.Fatal("expected an error for an unknown cert name, got nil")
+	}
+	if !strings.Contains(err.Error(), "test-cert") {
+		t.Errorf("error %q should list the configured cert names to help the operator, got none", err)
+	}
+}
+
+func TestRunTestHook_NoReloadHookConfiguredErrors(t *testing.T) {
+	cfg := &config.SpokeConfig{
+		Certs: []config.SpokeLocalCertConfig{
+			{Name: "test-cert", Domains: []string{"example.com"}}, // no ReloadHook
+		},
+	}
+	if err := runTestHook(cfg, "test-cert"); err == nil {
+		t.Fatal("expected an error for a cert with no reload_hook configured, got nil")
+	}
+}
+
+// TestRunTestHook_PerCertTimeoutOverride proves the per-cert hook_timeout
+// override is actually honored here, not just in spokeagent - a hook that
+// would time out under the spoke-wide default succeeds under a longer
+// per-cert override.
+func TestRunTestHook_PerCertTimeoutOverride(t *testing.T) {
+	// A short, portable delay: "sleep" doesn't exist on stock Windows
+	// (cmd.exe /C), and "timeout" refuses to run non-interactively - ping
+	// against localhost is the same portable stall internal/hook's own
+	// Windows tests already use.
+	delay := "sleep 0.2"
+	if runtime.GOOS == "windows" {
+		delay = "ping -n 2 127.0.0.1 >NUL"
+	}
+
+	cfg := &config.SpokeConfig{
+		HookTimeout: config.Duration(50 * time.Millisecond), // too short for the delay below
+		Certs: []config.SpokeLocalCertConfig{
+			{
+				Name:        "test-cert",
+				Domains:     []string{"example.com"},
+				ReloadHook:  delay + " && exit 0",
+				HookTimeout: config.Duration(5 * time.Second), // long enough
+			},
+		},
+	}
+	if err := runTestHook(cfg, "test-cert"); err != nil {
+		t.Fatalf("runTestHook with a per-cert override long enough for the hook to finish: %v", err)
 	}
 }

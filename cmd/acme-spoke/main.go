@@ -29,6 +29,7 @@ import (
 
 	"github.com/tmhal5l13/acme-agent/config"
 	"github.com/tmhal5l13/acme-agent/internal/enrolltoken"
+	"github.com/tmhal5l13/acme-agent/internal/hook"
 	"github.com/tmhal5l13/acme-agent/internal/hubclient"
 	"github.com/tmhal5l13/acme-agent/internal/onboard"
 	"github.com/tmhal5l13/acme-agent/internal/secureperm"
@@ -55,6 +56,8 @@ func run() error {
 	ltACMEEmail := flag.String("acme-email", "", "(-load-token) ACME account email for this spoke")
 	ltACMEEnv := flag.String("acme-environment", "staging", "(-load-token) staging or production")
 
+	testHook := flag.String("test-hook", "", "run exactly this certificate's reload_hook against its currently-installed files and exit, without contacting the hub or ACME - the name must match a certs[].name entry in -config")
+
 	flag.Parse()
 
 	umask.Restrict()
@@ -72,6 +75,10 @@ func run() error {
 	cfg, err := config.LoadSpokeConfig(*configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	if *testHook != "" {
+		return runTestHook(cfg, *testHook)
 	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
@@ -115,6 +122,48 @@ func run() error {
 	defer close(done)
 
 	agent.Run(ctx)
+	return nil
+}
+
+// runTestHook is -test-hook's entire job: find certName in cfg.Certs, run
+// exactly its reload_hook (with its resolved timeout - the same
+// zero-means-spoke-default convention spokeagent.Agent.hookTimeoutFor
+// uses, small enough to repeat here rather than export across packages
+// for one call site), and report the result - without touching the local
+// store, the hub, or ACME at all. Exists because otherwise the first time
+// an operator finds out a reload_hook command is wrong (a typo, the wrong
+// fmsadmin flags, a permissions problem) is when a real renewal happens,
+// potentially weeks away.
+func runTestHook(cfg *config.SpokeConfig, certName string) error {
+	var cert *config.SpokeLocalCertConfig
+	for i := range cfg.Certs {
+		if cfg.Certs[i].Name == certName {
+			cert = &cfg.Certs[i]
+			break
+		}
+	}
+	if cert == nil {
+		names := make([]string, len(cfg.Certs))
+		for i, c := range cfg.Certs {
+			names[i] = c.Name
+		}
+		return fmt.Errorf("no cert named %q in this config - configured names: %s", certName, strings.Join(names, ", "))
+	}
+	if cert.ReloadHook == "" {
+		return fmt.Errorf("cert %q has no reload_hook configured - nothing to test", certName)
+	}
+
+	timeout := cfg.HookTimeout.Duration()
+	if cert.HookTimeout != 0 {
+		timeout = cert.HookTimeout.Duration()
+	}
+
+	fmt.Printf("Running reload_hook for %q (timeout %s): %s\n", certName, timeout, cert.ReloadHook)
+	if err := hook.Run(context.Background(), cert.ReloadHook, timeout); err != nil {
+		fmt.Printf("hook failed: %v\n", err)
+		return err
+	}
+	fmt.Println("hook succeeded")
 	return nil
 }
 
