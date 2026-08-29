@@ -1486,3 +1486,51 @@ The manual rotation procedure:
   existing web-server/service config? require the operator to point at a
   specific file?) before any implementation starts. Not scoped or planned
   yet - recorded here so it isn't lost.
+
+  **Wildcards need their own rule within this feature, decided in advance:
+  a discovered wildcard certificate must be opt-in only, never
+  auto-adopted the way a discovered single-host certificate plausibly
+  could be.** A single-host cert found on disk is a safe bet to actually
+  be owned by that host. A wildcard is genuinely ambiguous — nothing in
+  the cert file says whether it was issued locally or is a passive copy
+  pushed there by some other system (config management, a central PKI,
+  Vault) that owns the real renewal lifecycle, which experience suggests
+  is actually the *more* common real-world reason a wildcard exists at
+  all (one cert reused across many hosts) rather than one host managing
+  its own. If discovery auto-adopted it, acme-agent would start renewing
+  with a brand-new key that never reaches whatever else that wildcard was
+  originally distributed to — silently forking trust rather than
+  preserving it, worse than doing nothing. Note also that "reuse one
+  wildcard across many hosts" is not something acme-agent should build
+  support for even if asked: every spoke generating and keeping its own
+  private key, never shared, is a deliberate property of this
+  architecture (see "Why two binaries"), and a shared-artifact model
+  would need a key-distribution mechanism that doesn't exist and cuts
+  against it. The acme-agent-native equivalent of "one wildcard, many
+  hosts" is N spokes each independently requesting their own copy of the
+  same wildcard domain, not one shared cert+key copied around.
+
+  Separately, on the question of a spoke auto-*requesting* a wildcard
+  (not discovering one) when it's managing a very large number of names
+  for one host: initial wildcard requests already work today with no
+  changes needed (`config.ValidateDomain` explicitly allows a `*.`
+  prefix, the DNS-01 relay authorization matches it, apex+wildcard
+  together on one cert is an established, tested pattern) — an operator
+  can already just list `*.example.com` in `domains:`. Auto-*inferring*
+  one from a pattern of subdomains is a different, separate question, and
+  the right default leans against it: a wildcard is a bigger blast-radius
+  decision (one leaked key or DNS-01 credential covers every subdomain,
+  not just the ones explicitly listed) that an operator should make on
+  purpose. It does have one hard, non-negotiable trigger, though: Let's
+  Encrypt caps a single certificate at 100 SANs, and separately rate-limits
+  new order creation to a 300-order bucket refilling one order per 36
+  seconds *per account* (each spoke has its own account - see "Behavior
+  at high spoke counts is unverified" above). A host with thousands of
+  individual hostnames can't fit them on one certificate at all past that
+  ceiling, and requesting/renewing that many as separate single-SAN
+  certificates would take on the order of days per renewal cycle just
+  from the order-rate limit alone, even spread out via
+  `RenewalJitter` - the order-rate limit bites well before the 100-SAN
+  ceiling would. Past some real threshold, a wildcard stops being a
+  preference and becomes the only practical option - worth surfacing to
+  the operator explicitly if this is ever built, not deciding silently.
